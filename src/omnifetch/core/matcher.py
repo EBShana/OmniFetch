@@ -1,0 +1,89 @@
+"""Matcher: attach an ingested resource to a Want.
+
+Two modes, both decided here in the core (crawlers stay unaware):
+  1. subscription: the source config sets ``want_key`` in the resource's
+     ``extra``; the resource belongs to that want directly.
+  2. rule: each WANTED want carries ``match_rule``
+     ``{"title_regex": "...", "aliases": [...]}``; the first matching rule wins.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+
+from .db import fetch_want_by_key, want_from_row
+from .models import Want, WantStatus
+from .util import iso, utcnow
+
+
+def find_or_create_want(
+    conn: sqlite3.Connection,
+    work_key: str,
+    display_title: str = "",
+    match_rule: dict | None = None,
+    rank_rule: dict | None = None,
+) -> Want:
+    now = iso(utcnow())
+    conn.execute(
+        """
+        INSERT INTO wants (work_key, display_title, match_rule, rank_rule, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(work_key) DO NOTHING
+        """,
+        (work_key, display_title or work_key,
+         json.dumps(match_rule or {}, ensure_ascii=False),
+         json.dumps(rank_rule or {}, ensure_ascii=False),
+         now, now),
+    )
+    conn.commit()
+    return fetch_want_by_key(conn, work_key)
+
+
+def list_wants(conn: sqlite3.Connection, status: WantStatus | None = None) -> list[Want]:
+    if status is not None:
+        rows = conn.execute("SELECT * FROM wants WHERE status=? ORDER BY id", (status.value,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM wants ORDER BY id").fetchall()
+    return [want_from_row(row) for row in rows]
+
+
+def _rule_matches(rule: dict, normalized_title: str) -> bool:
+    patterns: list[str] = []
+    if rule.get("title_regex"):
+        patterns.append(rule["title_regex"])
+    patterns.extend(rule.get("aliases") or [])
+    return any(re.search(p, normalized_title, re.IGNORECASE) for p in patterns)
+
+
+def assign_want(conn: sqlite3.Connection, resource) -> int | None:
+    """Attach a freshly ingested resource to a want; returns want_id or None."""
+    want_id: int | None = None
+
+    # 1) subscription mode
+    want_key = (resource.extra or {}).get("want_key")
+    if want_key:
+        row = conn.execute(
+            "SELECT id FROM wants WHERE work_key=?", (want_key,)
+        ).fetchone()
+        if row:
+            want_id = row["id"]
+
+    # 2) rule mode (only if subscription did not hit)
+    if want_id is None:
+        rows = conn.execute(
+            "SELECT * FROM wants WHERE status=?", (WantStatus.WANTED.value,)
+        ).fetchall()
+        for row in rows:
+            rule = json.loads(row["match_rule"] or "{}")
+            if rule and _rule_matches(rule, resource.normalized_title):
+                want_id = row["id"]
+                break
+
+    if want_id is not None:
+        conn.execute(
+            "UPDATE resources SET want_id=?, updated_at=? WHERE id=?",
+            (want_id, iso(utcnow()), resource.id),
+        )
+        conn.commit()
+    return want_id

@@ -1,0 +1,11 @@
+# Example RSS source. Copy and edit; one file per source.
+# Subscription mode: set want_key to the work_key of an existing want and
+# everything this feed returns becomes a candidate of that want.
+name = "example-rss"
+type = "rss"
+enabled = false                      # enable after editing
+url = "https://example.com/feed.xml"
+interval = 900                       # seconds between fetches
+source = "example"                   # site identifier stored on resources
+resource_type = "http"               # http | magnet | torrent
+# want_key = "the matrix"            # subscription mode (optional)

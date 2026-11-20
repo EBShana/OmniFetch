@@ -1,0 +1,8 @@
+# aria2 downloader instance (module skeleton — not implemented yet).
+name = "aria2"
+type = "aria2"
+enabled = false
+
+rpc_url = "http://aria2:6800/jsonrpc"
+rpc_secret = ""
+download_dir = "/downloads"

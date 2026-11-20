@@ -1,0 +1,8 @@
+# qBittorrent downloader instance (module skeleton — not implemented yet).
+name = "qbittorrent"
+type = "qbittorrent"
+enabled = false
+
+url = "http://qbittorrent:8080"
+username = "admin"
+password = "changeme"

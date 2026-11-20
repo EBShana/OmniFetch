@@ -1,0 +1,34 @@
+services:
+  omnifetch:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - omnifetch-data:/data
+      - ./config:/app/config
+    environment:
+      OMNFETCH_DB: /data/omnifetch.db
+      OMNFETCH_CONFIG: /app/config
+      OMNFETCH_POLL_INTERVAL: "30"
+      # OMNFETCH_WEBHOOK: "https://your-bot.example.com/webhook"
+    restart: unless-stopped
+
+  # Optional download tools, started with: docker compose --profile downloaders up -d
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    profiles: ["downloaders"]
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./downloads:/downloads
+    environment:
+      WEBUI_PORT: "8080"
+
+  aria2:
+    image: p3terx/aria2-pro:latest
+    profiles: ["downloaders"]
+    ports:
+      - "6800:6800"
+    volumes:
+      - ./downloads:/downloads
+      - ./config/aria2:/config
