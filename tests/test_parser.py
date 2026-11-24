@@ -28,6 +28,24 @@ def test_crc_bracket_is_not_a_group():
     assert q.group == "subsplease"
 
 
+def test_bracket_group_survives_codec_group_bracket():
+    _, q = parse_title("[SubsPlease] Some Show - 01 [1080p][x265-ABCD].mkv")
+    assert q.group == "subsplease"
+    assert q.codec == "x265"
+
+
+def test_codec_group_token_does_not_override_bracket_group():
+    _, q = parse_title("[Fansub] Show Name 1080p x265-ABCD")
+    assert q.group == "fansub"
+    assert q.codec == "x265"
+
+
+def test_codec_group_token_is_group_for_plain_titles():
+    _, q = parse_title("Show.Name.1080p.x265-GRP")
+    assert q.group == "grp"
+    assert q.codec == "x265"
+
+
 def test_cjk_season_episode():
     work_key, q = parse_title("某作品 第二季 第五集 [2160p]")
     assert work_key == "某作品"

@@ -243,7 +243,8 @@ def _extract_mirrors(html: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     for match in re.finditer(r'href=["\'](https?://[^"\']+)["\']', html):
         url = match.group(1)
-        host = urlparse(url).netloc.lower()
+        # nyaa publishes both nyaa.si and www.nyaa.si links.
+        host = urlparse(url).netloc.lower().removeprefix("www.")
         site = hosts.get(host)
         if site and (site, url) not in found:
             found.append((site, url))

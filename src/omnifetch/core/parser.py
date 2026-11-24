@@ -105,7 +105,8 @@ def _consume_token(token: str, quality: Quality) -> bool:
         head, _, tail = t.rpartition("-")
         if head in _CODECS and 2 <= len(tail) <= 20 and tail.isalnum():
             quality.codec = head
-            quality.group = tail.lower()
+            if quality.group is None:
+                quality.group = tail.lower()
             return True
 
     return False
@@ -130,7 +131,10 @@ def parse_title(raw_title: str) -> tuple[str, Quality]:
         if _CRC_RE.match(inner):  # CRC checksum, not a group tag
             return " "
         if not _consume_token(inner, quality):
-            quality.group = inner.lower()  # first free-text bracket = release group
+            # First free-text bracket = release group; later brackets (codec
+            # group tags, "x265-GRP", etc.) must not overwrite it.
+            if quality.group is None:
+                quality.group = inner.lower()
         return " "
 
     title = re.sub(r"\[([^\]]*)\]", handle_bracket, title)

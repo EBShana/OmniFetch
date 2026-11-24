@@ -26,14 +26,20 @@ from .util import iso
 DownloaderFor = Callable[[Resource], str | None]
 
 
+def _preference_weights(values: list) -> dict[str, int]:
+    """Earlier entries in a preference list rank higher."""
+    ordered = [str(v).lower() for v in (values or [])]
+    return {value: len(ordered) - i for i, value in enumerate(ordered)}
+
+
 def score(resource: Resource, rank_rule: dict) -> tuple:
     """Higher is better. Order: preferred source, preferred group,
-    resolution, size."""
-    sources = [s.lower() for s in (rank_rule.get("prefer_sources") or [])]
-    source_bonus = 1 if resource.source.lower() in sources else 0
+    resolution, size. Within a preference list, earlier = stronger."""
+    source_bonus = _preference_weights(rank_rule.get("prefer_sources")).get(
+        resource.source.lower(), 0)
     q = resource.quality
-    groups = [g.lower() for g in (rank_rule.get("prefer_groups") or [])]
-    group_bonus = 1 if (q.group and q.group.lower() in groups) else 0
+    group_bonus = _preference_weights(rank_rule.get("prefer_groups")).get(
+        q.group.lower() if q.group else "", 0)
     size = int(resource.extra.get("size") or 0)
     return (source_bonus, group_bonus, q.resolution or 0, size)
 
@@ -98,9 +104,17 @@ def advance_want(
         conn.commit()
         return "GIVE_UP"
 
-    best = max(candidates, key=lambda r: score(r, want.rank_rule))
-    downloader = downloader_for(best)
-    if downloader is None:
+    # Walk the ranking until a candidate has a downloader that accepts it;
+    # an unsupported top candidate must not bury the rest of the chain.
+    best = None
+    downloader = None
+    for candidate in sorted(candidates, key=lambda r: score(r, want.rank_rule),
+                            reverse=True):
+        name = downloader_for(candidate)
+        if name is not None:
+            best, downloader = candidate, name
+            break
+    if best is None:
         conn.execute(
             "UPDATE wants SET status='GIVEN_UP', updated_at=? WHERE id=?",
             (iso(now), want_id),

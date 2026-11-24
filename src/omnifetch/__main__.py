@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             print("错误：该实例未配置 cookie_file")
             return 1
         try:
-            qrcode_login(cookie_file, proxy=cfg.get("proxy") or None)
+            qrcode_login(cookie_file)
         except Exception as exc:
             print(f"登录失败：{exc}")
             return 1

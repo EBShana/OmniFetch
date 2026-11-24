@@ -62,12 +62,13 @@ class Aria2Rpc:
             response = self._client.post(self._url, json=payload)
         except httpx.HTTPError as exc:
             raise DownloadError(f"aria2 unreachable: {exc}", ErrorKind.TRANSIENT) from exc
-        if response.status_code >= 400:
-            raise DownloadError(
-                f"aria2 rpc http {response.status_code}", ErrorKind.TRANSIENT
-            )
-        data = response.json()
-        if "error" in data:
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        # aria2 reports RPC method faults (e.g. "GID ... is not found") with
+        # HTTP 400 *and* a JSON-RPC error body, so parse the body first.
+        if isinstance(data, dict) and "error" in data:
             code = data["error"].get("code", 0)
             message = data["error"].get("message", "unknown error")
             if code == -32602:  # invalid params — our request is wrong forever
@@ -75,6 +76,12 @@ class Aria2Rpc:
                     f"aria2 rejected params: {message}", ErrorKind.PERMANENT
                 )
             raise DownloadError(f"aria2 rpc error {code}: {message}", ErrorKind.TRANSIENT)
+        if response.status_code >= 400:
+            raise DownloadError(
+                f"aria2 rpc http {response.status_code}", ErrorKind.TRANSIENT
+            )
+        if not isinstance(data, dict) or "result" not in data:
+            raise DownloadError("aria2 rpc malformed response", ErrorKind.TRANSIENT)
         return data["result"]
 
 

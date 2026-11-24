@@ -22,6 +22,8 @@ external_id 约定：`hash:<btih>`（磁链/种子）或 `url:<uri>`（http/ftp/
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -57,9 +59,30 @@ _TRANSIENT_ERROR_KEYWORDS = (
 
 def _map_error(message: str, action: str) -> DownloadError:
     text = message or f"{action} 失败"
+    # Terminal causes win even when the text also contains retry hints
+    # (e.g. "链接错误，请稍后重试" must not be retried forever).
+    if any(k in text for k in _PERMANENT_ERROR_KEYWORDS):
+        return DownloadError(f"115 {action}: {text}", ErrorKind.PERMANENT)
     if any(k in text for k in _TRANSIENT_ERROR_KEYWORDS):
         return DownloadError(f"115 {action}: {text}", ErrorKind.TRANSIENT)
     return DownloadError(f"115 {action}: {text}", ErrorKind.PERMANENT)
+
+
+def btih_hex(token: str) -> str:
+    """Normalize a magnet BTIH to lowercase hex.
+
+    Links carry the hash either as 40-char hex or as 32-char Base32
+    (RFC 3986); 115 compares it as hex, so Base32 is decoded first.
+    """
+    token = (token or "").strip()
+    if len(token) == 40:
+        return token.lower()
+    try:
+        raw = base64.b32decode(token.upper())
+    except (binascii.Error, ValueError):
+        return token.lower()
+    return raw.hex() if len(raw) == 20 else token.lower()
+
 
 
 # --------------------------------------------------------------------- bencode
@@ -109,17 +132,21 @@ def torrent_infohash(content: bytes) -> str:
 class P115Api:
     """Cookie-auth'd minimal client. follow_redirects=False so a 302 (cookie
     expired) surfaces as a clear error instead of silently hitting the login
-    page HTML."""
+    page HTML.
 
-    def __init__(self, cookie_file: str, proxy: str | None = None,
-                 user_agent: str = DEFAULT_UA):
+    115 itself is always reached directly: the optional proxy in the config
+    only applies to fetching .torrent files (see P115Downloader)."""
+
+    def __init__(self, cookie_file: str, user_agent: str = DEFAULT_UA):
         self._cookie_file = Path(cookie_file)
-        self._client = httpx.Client(timeout=30, proxy=proxy or None,
-                                    follow_redirects=False)
+        self._client = httpx.Client(timeout=30, follow_redirects=False)
         self._client.headers["User-Agent"] = user_agent
         self._load_cookies()
         self._sign: tuple[str, str] | None = None
         self._sign_at = 0.0
+
+    def close(self) -> None:
+        self._client.close()
 
     # -- cookies
     def _load_cookies(self) -> None:
@@ -200,45 +227,52 @@ class P115Api:
             log.info("115 delete task best-effort failed: %s", exc)
 
 
-def qrcode_login(cookie_file: str, proxy: str | None = None,
-                 user_agent: str = DEFAULT_UA, timeout: int = 180) -> None:
+def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
+                 timeout: int = 180) -> None:
     """扫码登录：终端显示二维码，115 App 扫描确认后 Cookie 写入文件。"""
     import qrcode
 
-    client = httpx.Client(timeout=30, proxy=proxy or None)
+    client = httpx.Client(timeout=30)
     client.headers["User-Agent"] = user_agent
+    try:
+        token = client.get(_QR_TOKEN).json()["data"]
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(token["qrcode"])
+        qr.print_ascii(invert=True)
+        print("请用 115 手机 App 扫描上方二维码（%d 秒内）…" % timeout)
 
-    token = client.get(_QR_TOKEN).json()["data"]
-    qr = qrcode.QRCode(border=1)
-    qr.add_data(token["qrcode"])
-    qr.print_ascii(invert=True)
-    print("请用 115 手机 App 扫描上方二维码（%d 秒内）…" % timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(2)
+            resp = client.get(_QR_PROMPT, params={
+                "uid": token["uid"], "sign": token["sign"],
+                "time": token["time"], "_": int(time.time() * 1000),
+            }).json()
+            status = (resp.get("data") or {}).get("status")
+            if status == 2:
+                break
+            if status is False or (not resp.get("state") and status is None):
+                raise DownloadError(f"扫码状态异常：{resp.get('message')}",
+                                    ErrorKind.PERMANENT)
+        else:
+            raise DownloadError("扫码超时，请重试", ErrorKind.TRANSIENT)
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        time.sleep(2)
-        resp = client.get(_QR_PROMPT, params={
-            "uid": token["uid"], "sign": token["sign"],
-            "time": token["time"], "_": int(time.time() * 1000),
-        }).json()
-        status = (resp.get("data") or {}).get("status")
-        if status == 2:
-            break
-        if status is False or (not resp.get("state") and status is None):
-            raise DownloadError(f"扫码状态异常：{resp.get('message')}", ErrorKind.PERMANENT)
-    else:
-        raise DownloadError("扫码超时，请重试", ErrorKind.TRANSIENT)
+        login = client.post(_QR_LOGIN, data={"account": token["uid"]})
+        if login.status_code >= 400:
+            raise DownloadError(f"登录确认失败 HTTP {login.status_code}",
+                                ErrorKind.TRANSIENT)
 
-    login = client.post(_QR_LOGIN, data={"account": token["uid"]})
-    if login.status_code >= 400:
-        raise DownloadError(f"登录确认失败 HTTP {login.status_code}", ErrorKind.TRANSIENT)
-
-    # 汇总登录 Cookie 到专用客户端，验证登录态后落盘
-    api = P115Api(cookie_file=cookie_file, proxy=proxy)
-    for morsel in client.cookies.jar:
-        api._client.cookies.set(morsel.name, morsel.value, domain=morsel.domain)
-    api._check(api._request("GET", _SIGN_URL), "验证登录")
-    api.save_cookies()
+        # 汇总登录 Cookie 到专用客户端，验证登录态后落盘
+        api = P115Api(cookie_file=cookie_file)
+        try:
+            for morsel in client.cookies.jar:
+                api._client.cookies.set(morsel.name, morsel.value, domain=morsel.domain)
+            api._check(api._request("GET", _SIGN_URL), "验证登录")
+            api.save_cookies()
+        finally:
+            api.close()
+    finally:
+        client.close()
     print(f"登录成功，Cookie 已保存到 {cookie_file}")
 
 
@@ -265,7 +299,7 @@ class P115Downloader(DownloaderPlugin):
                     "未配置 cookie_file，请先运行 omnifetch 115-login "
                     f"{self.name} 扫码登录", ErrorKind.PERMANENT,
                 )
-            self._api = P115Api(self._cookie_file, proxy=self._proxy)
+            self._api = P115Api(self._cookie_file)
         return self._api
 
     # -------------------------------------------------------------- submit
@@ -279,7 +313,7 @@ class P115Downloader(DownloaderPlugin):
         try:
             if magnet:
                 api.add_task_url(uri, self._target_dir, self._savepath)
-                return f"hash:{magnet.group(1).lower()}"
+                return f"hash:{btih_hex(magnet.group(1))}"
             if resource.resource_type == ResourceType.TORRENT or \
                     uri.lower().endswith(".torrent"):
                 # .torrent 文件：解析 infohash 后走 bt 接口（无需上传种子）
@@ -326,7 +360,7 @@ class P115Downloader(DownloaderPlugin):
         needle = uri_or_key.lower()
         magnet = _BTITH_RE.search(needle)
         want_hash = (needle[5:] if needle.startswith("hash:")
-                     else magnet.group(1).lower() if magnet else "")
+                     else btih_hex(magnet.group(1)) if magnet else "")
         for task in self._iter_tasks():
             if want_hash and (task.get("info_hash") or "").lower() == want_hash:
                 return task

@@ -161,3 +161,115 @@ def test_manual_retry_revives_given_up_want(conn):
     want = fetch_want(conn, want_id)
     assert want.status == WantStatus.WANTED
     assert fetch_task(conn, task.id).status.value == "QUEUED"
+
+
+# ------------------------------------------------------- crawl scheduling
+
+class _RecordingCrawler:
+    def __init__(self, interval: int, error: Exception | None = None):
+        self.config = {"interval": interval}
+        self.error = error
+        self.calls = 0
+
+    def fetch(self):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return []
+
+
+def _crawl_ctx(tmp_path, crawler):
+    settings = Settings(db_path=str(tmp_path / "crawl.db"),
+                        config_dir=str(tmp_path / "cfg"))
+    return runner.Context(settings, {"demo": crawler}, {}, [])
+
+
+def test_crawler_failure_keeps_detail_and_retries_before_long_interval(tmp_path):
+    conn = connect(str(tmp_path / "crawl.db"))
+    init_db(conn)
+    crawler = _RecordingCrawler(interval=30 * 24 * 3600,
+                                error=RuntimeError("sheet returned 503"))
+    ctx = _crawl_ctx(tmp_path, crawler)
+    now = utcnow()
+
+    trigger.run_due_crawlers(conn, ctx, now)
+    assert crawler.calls == 1
+    row = conn.execute("SELECT error FROM source_runs").fetchone()
+    assert "RuntimeError" in row["error"] and "sheet returned 503" in row["error"]
+
+    # No hammering right after a failure ...
+    trigger.run_due_crawlers(conn, ctx, now + timedelta(seconds=60))
+    assert crawler.calls == 1
+
+    # ... but a monthly source is retried within minutes, not next month.
+    trigger.run_due_crawlers(conn, ctx, now + timedelta(seconds=301))
+    assert crawler.calls == 2
+    conn.close()
+
+
+def test_successful_crawler_keeps_its_full_interval(tmp_path):
+    conn = connect(str(tmp_path / "crawl.db"))
+    init_db(conn)
+    crawler = _RecordingCrawler(interval=3600)
+    ctx = _crawl_ctx(tmp_path, crawler)
+    now = utcnow()
+
+    trigger.run_due_crawlers(conn, ctx, now)
+    trigger.run_due_crawlers(conn, ctx, now + timedelta(seconds=600))
+    assert crawler.calls == 1
+
+    trigger.run_due_crawlers(conn, ctx, now + timedelta(seconds=3601))
+    assert crawler.calls == 2
+    conn.close()
+
+
+def test_run_forever_ticks_until_stopped(monkeypatch, tmp_path):
+    settings = Settings(db_path=str(tmp_path / "t.db"),
+                        config_dir=str(tmp_path / "cfg"), poll_interval=0)
+    ctx = runner.Context(settings, {}, {}, [])
+    stop = threading.Event()
+    ticks = []
+
+    def fake_tick(_ctx):
+        ticks.append(1)
+        if len(ticks) == 3:
+            stop.set()
+
+    monkeypatch.setattr(runner, "run_once", fake_tick)
+    runner.run_forever(ctx, stop)
+    assert len(ticks) == 3
+
+
+def test_want_without_resources_waits_instead_of_giving_up(conn):
+    want = find_or_create_want(conn, "not-discovered-yet")
+    assert want.status == WantStatus.WANTED
+
+    assert taskgen.advance_want(conn, want.id, DL, utcnow()) == "WAITING"
+    assert fetch_want(conn, want.id).status == WantStatus.WANTED
+
+    res, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/late", "Work 1080p")
+    )
+    conn.execute("UPDATE resources SET want_id=? WHERE id=?", (want.id, res.id))
+    conn.commit()
+
+    assert taskgen.advance_want(conn, want.id, DL, utcnow()) == "NEW_TASK"
+
+
+def test_fail_task_on_non_downloading_task_is_noop(conn):
+    res, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/noop", "Work 1080p")
+    )
+    want_id = attach(conn, res)
+    now = utcnow()
+    taskgen.advance_want(conn, want_id, DL, now)
+    task = statemachine.claim_task(conn, now)
+
+    first = statemachine.fail_task(
+        conn, task.id, ErrorKind.PERMANENT, "404", POLICY, now
+    )
+    second = statemachine.fail_task(
+        conn, task.id, ErrorKind.PERMANENT, "404", POLICY, now
+    )
+    assert first == FailOutcome.FAILED
+    assert second == FailOutcome.NOOP

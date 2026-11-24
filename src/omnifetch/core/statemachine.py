@@ -241,9 +241,18 @@ def ignore_task(conn: sqlite3.Connection, task_id: int, now: datetime) -> bool:
 
 
 def revive_want(conn: sqlite3.Connection, want_id: int, now: datetime) -> None:
-    """Re-open a want (e.g. user wants a better version after acquiring)."""
+    """Re-open a want (e.g. user wants a better version after acquiring).
+
+    Candidates that were marked REDUNDANT when the want got acquired become
+    available again; the acquired resource keeps its TASKED status so it is
+    not downloaded twice."""
+    stamp = iso(now)
     conn.execute(
         "UPDATE wants SET status='WANTED', acquired_resource_id=NULL, updated_at=? WHERE id=?",
-        (iso(now), want_id),
+        (stamp, want_id),
+    )
+    conn.execute(
+        "UPDATE resources SET status='NEW', updated_at=? WHERE want_id=? AND status='REDUNDANT'",
+        (stamp, want_id),
     )
     conn.commit()

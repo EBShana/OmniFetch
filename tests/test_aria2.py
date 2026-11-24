@@ -5,7 +5,7 @@ import pytest
 
 from omnifetch.core.models import ErrorKind, Resource, ResourceType
 from omnifetch.downloaders.base import DownloadError, PollStatus
-from omnifetch.downloaders.http import Aria2Downloader
+from omnifetch.downloaders.http import Aria2Downloader, Aria2Rpc
 
 
 class StubRpc:
@@ -135,3 +135,49 @@ def test_cancel_swallows_gone_errors():
     dl = make(responses=[DownloadError("GID is not found")])
     dl.cancel("gid-1")  # must not raise
     assert dl._rpc.calls[0][0] == "remove"
+
+
+# ------------------------------------------------------------- raw RPC call
+
+class _FakeResponse:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+class _FakeClient:
+    def __init__(self, response):
+        self._response = response
+
+    def post(self, url, json):
+        return self._response
+
+
+def rpc_with(status_code, payload=None, text=""):
+    rpc = Aria2Rpc("http://x")
+    rpc._client = _FakeClient(_FakeResponse(status_code, payload, text))
+    return rpc
+
+
+def test_rpc_http_400_with_jsonrpc_error_is_parsed():
+    """aria2 returns 400 + error body for 'GID ... is not found'."""
+    rpc = rpc_with(400, {"jsonrpc": "2.0", "id": "1",
+                         "error": {"code": 1, "message": "GID 999 is not found"}})
+    with pytest.raises(DownloadError) as exc_info:
+        rpc.call("tellStatus", "999")
+    assert exc_info.value.kind == ErrorKind.TRANSIENT
+    assert "not found" in str(exc_info.value).lower()
+
+
+def test_rpc_http_400_without_json_body_is_transient():
+    rpc = rpc_with(400, None, "Bad Request")
+    with pytest.raises(DownloadError) as exc_info:
+        rpc.call("tellStatus", "999")
+    assert exc_info.value.kind == ErrorKind.TRANSIENT
+    assert "http 400" in str(exc_info.value)

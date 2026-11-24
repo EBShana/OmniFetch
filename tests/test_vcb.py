@@ -82,6 +82,14 @@ def test_nyaa_view_url_rewritten_to_direct_torrent(crawler):
     assert rtype == ResourceType.TORRENT
 
 
+def test_www_nyaa_mirror_is_recognized_and_resolved(crawler):
+    page = '<a href="https://www.nyaa.si/view/42">nyaa</a>'
+    assert vcb._extract_mirrors(page) == [("nyaa", "https://www.nyaa.si/view/42")]
+    uris, rtype = crawler._resolve_mirror("nyaa", "https://www.nyaa.si/view/42", None)
+    assert uris == ["https://nyaa.si/download/42.torrent"]
+    assert rtype == ResourceType.TORRENT
+
+
 def test_dmhy_page_magnet_extracted(crawler, monkeypatch):
     monkeypatch.setattr(vcb, "_http_get", lambda url, proxy: DMHY_PAGE)
     uris, rtype = crawler._resolve_mirror(

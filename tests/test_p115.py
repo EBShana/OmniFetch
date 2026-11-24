@@ -1,14 +1,21 @@
 """P115 (115 网盘离线下载) plugin tests with a stubbed API."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 
 import pytest
 
 from omnifetch.core.models import ErrorKind, Resource, ResourceType
+from omnifetch.downloaders import p115
 from omnifetch.downloaders.base import DownloadError, PollStatus
-from omnifetch.downloaders.p115 import P115Api, P115Downloader, torrent_infohash
+from omnifetch.downloaders.p115 import (
+    P115Api,
+    P115Downloader,
+    btih_hex,
+    torrent_infohash,
+)
 
 INFO = b"d4:name4:test6:lengthi4ee"
 TORRENT = b"d8:announce16:udp://tracker:804:info" + INFO + b"e"
@@ -75,6 +82,23 @@ def test_submit_magnet_uses_url_api():
         ResourceType.MAGNET))
     assert key == "hash:abcdef0123456789abcdef0123456789abcdef01"
     assert len(api.added_urls) == 1 and not api.added_bts
+
+
+def test_btih_hex_normalizes_base32_and_hex():
+    raw = bytes.fromhex("ab" * 20)
+    b32 = base64.b32encode(raw).decode()
+    assert btih_hex(b32) == "ab" * 20
+    assert btih_hex("AB" * 20) == "ab" * 20
+    assert btih_hex("not-a-hash") == "not-a-hash"
+
+
+def test_submit_base32_magnet_returns_hex_key():
+    raw = bytes.fromhex("ab" * 20)
+    b32 = base64.b32encode(raw).decode()
+    api = FakeApi()
+    key = make(api).submit(resource(f"magnet:?xt=urn:btih:{b32}", ResourceType.MAGNET))
+    assert key == "hash:" + "ab" * 20
+    assert api.added_urls == [f"magnet:?xt=urn:btih:{b32}"]
 
 
 def test_submit_torrent_parses_infohash_and_uses_bt_api():
@@ -159,6 +183,12 @@ def test_exists_matches_by_hash_or_url():
     assert not dl3.exists(resource("magnet:?xt=urn:btih:" + "FF" * 20, ResourceType.MAGNET))
 
 
+def test_exists_matches_base32_magnet_by_hex_hash():
+    b32 = base64.b32encode(bytes.fromhex("ab" * 20)).decode()
+    dl = make(FakeApi(tasks=[_task(info_hash="ab" * 20)]))
+    assert dl.exists(resource(f"magnet:?xt=urn:btih:{b32}", ResourceType.MAGNET))
+
+
 def test_cancel_deletes_by_hash():
     api = FakeApi()
     dl = make(api)
@@ -200,3 +230,36 @@ def test_submit_without_cookie_config_is_permanent():
         dl.submit(resource("magnet:?xt=urn:btih:" + "AA" * 20, ResourceType.MAGNET))
     assert exc_info.value.kind == ErrorKind.PERMANENT
     assert "115-login" in str(exc_info.value)
+
+
+# ------------------------------------------------------- error classification
+
+def test_permanent_keyword_wins_over_transient_hint():
+    # "链接错误" is terminal even though the text also says "请稍后".
+    error = p115._map_error("链接错误，请稍后重试", "添加离线任务")
+    assert error.kind == ErrorKind.PERMANENT
+
+    error = p115._map_error("系统繁忙，请稍后重试", "添加离线任务")
+    assert error.kind == ErrorKind.TRANSIENT
+
+    error = p115._map_error("未知问题", "添加离线任务")
+    assert error.kind == ErrorKind.PERMANENT
+
+
+def test_api_client_ignores_proxy_and_can_be_closed(monkeypatch):
+    captured: dict = {}
+
+    class RecordingApi:
+        def __init__(self, cookie_file, **kw):
+            captured["cookie_file"] = cookie_file
+            captured["kw"] = kw
+
+    monkeypatch.setattr(p115, "P115Api", RecordingApi)
+    dl = P115Downloader("p115", {"cookie_file": "x.json", "proxy": "http://p:8080"})
+    dl._get_api()
+    assert captured["cookie_file"] == "x.json"
+    assert "proxy" not in captured["kw"]  # proxy only applies to .torrent fetches
+
+    api = P115Api("missing.json")
+    api.close()
+    assert api._client.is_closed

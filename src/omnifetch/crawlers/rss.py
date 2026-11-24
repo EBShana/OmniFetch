@@ -31,18 +31,22 @@ class RssCrawler(CrawlerPlugin):
         results: list[Resource] = []
         for entry in feed.entries:
             link = getattr(entry, "link", "")
-            if not link:
-                continue
 
-            uris = [link]
+            # An enclosure is the actual media/download file; the plain link
+            # is usually just the article page, so it only acts as fallback.
+            enclosure_uris: list[str] = []
             size = None
             for enclosure in getattr(entry, "enclosures", []) or []:
                 href = enclosure.get("href")
                 if href:
-                    uris.append(href)
+                    enclosure_uris.append(href)
                 length = enclosure.get("length")
                 if length and str(length).isdigit():
                     size = int(length)
+
+            uris = list(dict.fromkeys(enclosure_uris + ([link] if link else [])))
+            if not uris:
+                continue
 
             published = None
             parsed = getattr(entry, "published_parsed", None)

@@ -8,6 +8,7 @@ When the token is empty, everything is open (LAN/trusted use).
 from __future__ import annotations
 
 import hmac
+import logging
 import sqlite3
 from typing import Any
 
@@ -20,6 +21,8 @@ from ..core import db, statemachine, taskgen
 from ..core.matcher import create_want as _create_want
 from ..core.models import TaskStatus, WantStatus
 from ..core.util import utcnow
+
+log = logging.getLogger(__name__)
 
 
 class WantIn(BaseModel):
@@ -194,10 +197,27 @@ def create_api_router(settings: Settings, ctx) -> APIRouter:
         if row["status"] == "ACQUIRED":
             raise HTTPException(409, "want already acquired; re-open it first")
         now = utcnow()
+        # In-flight downloads must also be stopped on the tool side, or the
+        # abandoned attempt keeps downloading in the background.
+        for row in conn.execute(
+            """
+            SELECT downloader, external_id FROM tasks
+            WHERE status='DOWNLOADING'
+              AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
+            """,
+            (want_id,),
+        ).fetchall():
+            downloader = ctx.downloaders.get(row["downloader"])
+            if downloader is not None and row["external_id"]:
+                try:
+                    downloader.cancel(row["external_id"])
+                except Exception:
+                    log.warning("retry-next: cancel failed for %s",
+                                row["external_id"], exc_info=True)
         conn.execute(
             """
             UPDATE tasks SET status='IGNORED', updated_at=?
-            WHERE status IN ('FAILED','FAILED_RETRYABLE','QUEUED')
+            WHERE status IN ('QUEUED', 'DOWNLOADING', 'FAILED', 'FAILED_RETRYABLE')
               AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
             """,
             (now.isoformat(), want_id),
