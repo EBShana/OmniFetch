@@ -89,6 +89,8 @@ class Aria2Rpc:
 class Aria2Downloader(DownloaderPlugin):
     type = "aria2"
     accepts = (ResourceType.HTTP, ResourceType.TORRENT, ResourceType.MAGNET)
+    DEFAULT_CONFIG = {"rpc_url": "http://127.0.0.1:6800/jsonrpc",
+                      "rpc_secret": "", "download_dir": ""}
 
     def __init__(self, name: str, config: dict):
         super().__init__(name, config)

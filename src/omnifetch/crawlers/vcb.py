@@ -47,6 +47,8 @@ _NYAA_VIEW_RE = re.compile(r"https?://(?:www\.)?nyaa\.si/view/(\d+)")
 @register
 class VcbCrawler(CrawlerPlugin):
     type = "vcb"
+    DEFAULT_CONFIG = {"sheet_id": "", "gid": "0", "interval": 1800,
+                      "max_pages_per_run": 30, "delay": 2.0, "backend": "cookie"}
 
     def fetch(self) -> list[Resource]:
         proxy = self.config.get("proxy") or None

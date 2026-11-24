@@ -119,6 +119,133 @@ def test_task_retry_and_ignore_via_api(client, env):
     assert client.get("/api/tasks").json()[0]["status"] == "IGNORED"
 
 
+def _seed_task(settings, want_id: int, status: str) -> int:
+    conn = core_db.connect(settings.db_path)
+    resource_id = conn.execute(
+        "SELECT id FROM resources WHERE want_id=?", (want_id,)
+    ).fetchone()["id"]
+    now = iso(utcnow())
+    cur = conn.execute(
+        "INSERT INTO tasks (resource_id, downloader, status, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (resource_id, f"test-dl-{status.lower()}", status, now, now),
+    )
+    conn.commit()
+    task_id = cur.lastrowid
+    conn.close()
+    return task_id
+
+
+def test_failure_fragment_actions_stay_on_failures_view(client, env):
+    _, settings = env
+    want_id = _seed_want(settings)
+    task_id = _seed_task(settings, want_id, "FAILED")
+
+    html = client.post(f"/ui/tasks/{task_id}/ignore", data={"view": "failures"}).text
+    assert "失败的任务" in html and "放弃的作品" in html
+    assert "<th>下载器</th>" not in html      # not the tasks table
+    assert f'<td class="muted">{task_id}</td>' not in html  # left the queue
+
+
+def test_given_up_fragment_actions_stay_on_failures_view(client, env):
+    _, settings = env
+    want_id = _seed_want(settings)
+    conn = core_db.connect(settings.db_path)
+    conn.execute("UPDATE wants SET status='GIVEN_UP' WHERE id=?", (want_id,))
+    conn.commit()
+    conn.close()
+
+    html = client.post(f"/ui/wants/{want_id}/reopen", data={"view": "failures"}).text
+    assert "失败的任务" in html and "放弃的作品" in html
+
+
+def test_task_action_keeps_status_filter(client, env):
+    _, settings = env
+    want_id = _seed_want(settings)
+    failed_id = _seed_task(settings, want_id, "FAILED")
+    queued_id = _seed_task(settings, want_id, "QUEUED")
+
+    html = client.post(f"/ui/tasks/{failed_id}/ignore",
+                       data={"view": "tasks", "status": "FAILED"}).text
+    assert f'<td class="muted">{queued_id}</td>' not in html
+    assert "没有匹配的任务" in html
+
+
+def test_fragments_carry_the_active_view(client, env):
+    _, settings = env
+    want_id = _seed_want(settings)
+    _seed_task(settings, want_id, "FAILED")
+    _seed_task(settings, want_id, "QUEUED")
+
+    assert '"view": "failures"' in client.get("/frag/failures").text
+    tasks_html = client.get("/frag/tasks", params={"status": "FAILED"}).text
+    assert '"view": "tasks", "status": "FAILED"' in tasks_html
+
+
+def test_invalid_title_regex_returns_400(client):
+    response = client.post("/api/wants", json={
+        "work_key": "bad regex",
+        "match_rule": {"title_regex": "(["},
+    })
+    assert response.status_code == 400
+    assert client.get("/api/wants").json() == []
+
+
+def test_get_candidates_query_count_does_not_grow_with_rows(env):
+    from omnifetch.webapi.app import get_candidates
+
+    _, settings = env
+    want_id = _seed_want(settings)
+    conn = core_db.connect(settings.db_path)
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    data = get_candidates(conn, want_id)
+    assert len(data["candidates"]) == 1
+    baseline = len(statements)
+
+    for i in range(4):
+        res, _ = ingest.ingest_resource(
+            conn,
+            Resource(title=f"Extra {i} 1080p", source_url=f"https://x.example/{i}",
+                     source="vcb-nyaa", download_uris=[f"https://x.example/{i}"],
+                     resource_type=ResourceType.HTTP),
+        )
+        conn.execute("UPDATE resources SET want_id=? WHERE id=?", (want_id, res.id))
+    conn.commit()
+
+    expected = conn.execute(
+        "SELECT COUNT(*) FROM resources WHERE want_id=?", (want_id,)).fetchone()[0]
+    statements.clear()
+    data = get_candidates(conn, want_id)
+    conn.set_trace_callback(None)
+    conn.close()
+    assert len(data["candidates"]) == expected > 1
+    assert len(statements) == baseline, statements
+
+
+def test_retry_next_ignores_downloading_task(client, env):
+    _, settings = env
+    want_id = _seed_want(settings)
+    conn = core_db.connect(settings.db_path)
+    resource_id = conn.execute(
+        "SELECT id FROM resources WHERE want_id=?", (want_id,)
+    ).fetchone()["id"]
+    now = iso(utcnow())
+    conn.execute(
+        "INSERT INTO tasks (resource_id, downloader, status, created_at, updated_at)"
+        " VALUES (?, 'test-dl', 'DOWNLOADING', ?, ?)",
+        (resource_id, now, now),
+    )
+    conn.commit()
+    task_id = conn.execute("SELECT id FROM tasks").fetchone()["id"]
+    conn.close()
+
+    assert client.post(f"/api/wants/{want_id}/retry-next").status_code == 200
+    tasks = {t["id"]: t for t in client.get("/api/tasks").json()}
+    assert tasks[task_id]["status"] == "IGNORED"
+
+
 def test_reopen_endpoint(client, env):
     _, settings = env
     want_id = _seed_want(settings)

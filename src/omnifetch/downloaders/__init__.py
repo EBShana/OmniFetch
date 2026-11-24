@@ -20,6 +20,12 @@ def downloader_types() -> list[str]:
     return sorted(_REGISTRY)
 
 
+def default_config(type_name: str) -> dict:
+    """Field template written into a freshly created plugin instance."""
+    cls = _REGISTRY.get(type_name)
+    return dict(getattr(cls, "DEFAULT_CONFIG", {})) if cls else {}
+
+
 from .http import Aria2Downloader  # noqa: E402,F401  (register built-ins)
 from .p115 import P115Downloader  # noqa: E402,F401
 from .qbittorrent import QBittorrentDownloader  # noqa: E402,F401

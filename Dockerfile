@@ -8,9 +8,9 @@ RUN pip install --no-cache-dir .
 
 COPY config ./config
 
-ENV OMNFETCH_DB=/data/omnifetch.db \
-    OMNFETCH_CONFIG=/app/config \
-    OMNFETCH_POLL_INTERVAL=30
+ENV OMNIFETCH_DB=/data/omnifetch.db \
+    OMNIFETCH_CONFIG=/app/config \
+    OMNIFETCH_POLL_INTERVAL=30
 
 VOLUME /data
 EXPOSE 8080

@@ -1,6 +1,6 @@
 """REST API (JSON, /api/*) for scripts and external tools.
 
-Auth: when OMNFETCH_TOKEN is set, every endpoint except /api/health
+Auth: when OMNIFETCH_TOKEN is set, every endpoint except /api/health
 requires the token as X-OmniFetch-Token header, Authorization: Bearer,
 ?token= query param, or the omnifetch_token cookie (set by the Web UI).
 When the token is empty, everything is open (LAN/trusted use).
@@ -54,28 +54,35 @@ def check_token(request: Request, settings: Settings) -> None:
 
 def get_candidates(conn: sqlite3.Connection, want_id: int) -> dict[str, Any]:
     """Candidate chain of one want, ranked by its rank_rule, each with its
-    task state — shared by the JSON API and the Web UI fragment."""
+    task state — shared by the JSON API and the Web UI fragment.
+
+    One joined query only: resource rows carry everything resource_from_row
+    needs, so there is no per-row refetch (the old N+1)."""
     want = db.fetch_want(conn, want_id)
     if want is None:
         raise HTTPException(404, "want not found")
     rows = conn.execute(
         """
-        SELECT r.id AS resource_id, r.title, r.source, r.resource_type,
-               r.status AS resource_status, r.work_key, r.quality,
+        SELECT r.*,
                t.id AS task_id, t.downloader, t.status AS task_status,
                t.progress, t.retry_count, t.error_kind, t.error_message,
-               t.external_id, t.updated_at
+               t.external_id, t.updated_at AS task_updated_at
         FROM resources r LEFT JOIN tasks t ON t.resource_id = r.id
-        WHERE r.want_id = ? ORDER BY r.id
+        WHERE r.want_id = ? ORDER BY r.id, t.id
         """,
         (want_id,),
     ).fetchall()
     candidates = []
     for row in rows:
+        resource = db.resource_from_row(row)
         item = dict(row)
-        resource = db.resource_from_row(
-            conn.execute("SELECT * FROM resources WHERE id=?",
-                         (row["resource_id"],)).fetchone())
+        for extra_key in ("id", "status", "quality", "updated_at", "source_url",
+                          "download_uris", "normalized_title", "extra",
+                          "want_id", "created_at", "task_updated_at"):
+            item.pop(extra_key, None)
+        item["resource_id"] = row["id"]
+        item["resource_status"] = row["status"]
+        item["updated_at"] = row["task_updated_at"]
         item["quality"] = resource.quality.__dict__
         item["score"] = taskgen.score(resource, want.rank_rule)
         item["uris"] = resource.download_uris
@@ -141,8 +148,11 @@ def create_api_router(settings: Settings, ctx) -> APIRouter:
 
     @router.post("/wants", status_code=201, dependencies=[Depends(auth)])
     def create_want(body: WantIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-        want, matched = _create_want(conn, body.work_key, body.display_title,
-                                     body.match_rule, body.rank_rule)
+        try:
+            want, matched = _create_want(conn, body.work_key, body.display_title,
+                                         body.match_rule, body.rank_rule)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         return {"id": want.id, "work_key": want.work_key, "status": want.status.value,
                 "matched_existing": matched}
 

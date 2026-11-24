@@ -9,3 +9,4 @@ config-it/
 tmp/
 config/sources.d/vcb.toml
 config/omnifetch.toml
+omnifetch-repomix.txt

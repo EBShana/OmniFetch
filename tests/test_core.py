@@ -148,6 +148,117 @@ def test_permanent_failure_falls_back_to_next_candidate(conn):
     assert want.acquired_resource_id == fallback.id
 
 
+def test_aliases_are_literal_substrings_not_regex(conn):
+    want = find_or_create_want(conn, "fri ren", "Frieren", {"aliases": ["fri.ren"]})
+    assert want.id
+
+    # "." is a literal dot now: it must not match "frieren".
+    res, _ = ingest.ingest_resource(conn, make_resource("https://a.example/1", "Frieren 1080p"))
+    assert matcher.assign_want(conn, res) is None
+
+    # A literal "(" in an alias is also safe (an unescaped regex would raise).
+    find_or_create_want(conn, "frieren 2023", "Frieren 2023",
+                        {"aliases": ["frieren (2023)"]})
+    res2, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/2", "Frieren (2023) 1080p"))
+    assert matcher.assign_want(conn, res2) == fetch_want_by_key(conn, "frieren 2023").id
+
+
+def test_invalid_title_regex_is_rejected_at_creation(conn):
+    with pytest.raises(ValueError):
+        find_or_create_want(conn, "bad regex", "Bad", {"title_regex": "(["})
+
+
+def test_invalid_title_regex_cannot_crash_matching(conn):
+    # A rule already stored with a broken pattern is skipped, not raised.
+    assert matcher._rule_matches({"title_regex": "(["}, "anything") is False
+
+
+def test_reopen_restores_redundant_candidates(conn):
+    first, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/1080", "Work 2020 1080p BluRay", size=1000)
+    )
+    second, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/720", "Work 2020 720p WEB-DL", size=500)
+    )
+    want_id = attach(conn, first)
+    conn.execute("UPDATE resources SET want_id=? WHERE id=?", (want_id, second.id))
+    conn.commit()
+    now = utcnow()
+
+    assert taskgen.advance_want(conn, want_id, DL, now) == "NEW_TASK"
+    task = statemachine.claim_task(conn, now)
+    assert statemachine.complete_task(conn, task.id, now) == "WANT_ACQUIRED"
+
+    def statuses() -> dict[int, str]:
+        return {r["id"]: r["status"] for r in conn.execute(
+            "SELECT id, status FROM resources WHERE want_id=?", (want_id,))}
+
+    assert statuses()[second.id] == "REDUNDANT"
+
+    statemachine.revive_want(conn, want_id, now)
+    assert fetch_want(conn, want_id).status == WantStatus.WANTED
+    after = statuses()
+    assert after[first.id] == "TASKED"   # already downloaded, not retried
+    assert after[second.id] == "NEW"     # fallback is a candidate again
+
+    assert taskgen.advance_want(conn, want_id, DL, utcnow()) == "NEW_TASK"
+    queued = conn.execute("SELECT resource_id FROM tasks WHERE status='QUEUED'").fetchone()
+    assert queued["resource_id"] == second.id
+
+
+def test_no_downloader_falls_through_to_next_candidate(conn):
+    high, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/1080", "Work 2020 1080p BluRay", size=1000)
+    )
+    low, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/720", "Work 2020 720p WEB-DL", size=500)
+    )
+    want_id = attach(conn, high)
+    conn.execute("UPDATE resources SET want_id=? WHERE id=?", (want_id, low.id))
+    conn.commit()
+
+    def only_low(resource: Resource) -> str | None:
+        return None if resource.id == high.id else "test-dl"
+
+    assert taskgen.advance_want(conn, want_id, only_low, utcnow()) == "NEW_TASK"
+    task = conn.execute("SELECT resource_id FROM tasks").fetchone()
+    assert task["resource_id"] == low.id
+    assert fetch_want(conn, want_id).status == WantStatus.WANTED
+
+
+def test_no_downloader_for_any_candidate_gives_up(conn):
+    res, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/1", "Work 1080p")
+    )
+    want_id = attach(conn, res)
+
+    assert taskgen.advance_want(conn, want_id, lambda r: None, utcnow()) == "NO_DOWNLOADER"
+    assert fetch_want(conn, want_id).status == WantStatus.GIVEN_UP
+
+
+def test_preference_lists_rank_by_position():
+    rule = {"prefer_sources": ["vcb-nyaa", "vcb-dmhy", "other"],
+            "prefer_groups": ["GroupA", "GroupB"]}
+
+    def made(source: str, group: str | None) -> Resource:
+        res = Resource(title="x", source_url="https://x/" + source, source=source)
+        res.quality.group = group
+        res.quality.resolution = 1080
+        return res
+
+    first, second, third, unlisted = (
+        taskgen.score(made(name, None), rule) for name in
+        ("vcb-nyaa", "vcb-dmhy", "other", "unlisted")
+    )
+    assert first[0] > second[0] > third[0] > unlisted[0] == 0
+
+    group_a = taskgen.score(made("unlisted", "GroupA"), rule)
+    group_b = taskgen.score(made("unlisted", "GroupB"), rule)
+    no_group = taskgen.score(made("unlisted", None), rule)
+    assert group_a[1] > group_b[1] > no_group[1] == 0
+
+
 def test_manual_retry_revives_given_up_want(conn):
     res, _ = ingest.ingest_resource(conn, make_resource("https://a.example/1", "Work 1080p"))
     want_id = attach(conn, res)

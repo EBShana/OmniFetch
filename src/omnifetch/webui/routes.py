@@ -29,6 +29,8 @@ from ..core import db, statemachine, taskgen
 from ..core.matcher import create_want as _create_want
 from ..core.util import parse_iso, utcnow
 from ..crawlers import crawler_types
+from ..crawlers import default_config as crawler_default_config
+from ..downloaders import default_config as downloader_default_config
 from ..downloaders import downloader_types
 from ..webapi.app import check_token, get_candidates
 
@@ -68,20 +70,32 @@ _CORE_LABELS = {
 }
 
 
-def _coerce(value: str):
-    """Form strings -> bool/int/float/str, matching what TOML files carry."""
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    try:
-        return float(value)
-    except ValueError:
-        return value
+_CORE_INT_KEYS = {
+    "poll_interval", "reaper_stale_minutes", "stalled_after_minutes",
+    "max_dispatch_per_tick", "max_active_downloads",
+    "retry_max_retries", "retry_base_seconds", "retry_max_seconds",
+}
+
+
+def _coerce_like(value: str, current):
+    """Coerce a form string using the current value's type as the schema.
+
+    Only fields already stored as numbers are converted; identifiers and
+    secrets (e.g. want_key="001234") stay strings and keep leading zeros.
+    """
+    if isinstance(current, bool):
+        return value == "true"
+    if isinstance(current, int):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if isinstance(current, float):
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    return value
 
 
 def _toast(html: str, message: str) -> Response:
@@ -174,7 +188,8 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
                 ORDER BY t.id DESC LIMIT 200
                 """
             ).fetchall()
-        return render("partials/tasks_rows.html", tasks=[dict(r) for r in rows])
+        return render("partials/tasks_rows.html", tasks=[dict(r) for r in rows],
+                      status=status or "")
 
     # ------------------------------------------------------- fragments
     @router.get("/frag/dashboard", dependencies=[Depends(auth)])
@@ -219,8 +234,7 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
     def frag_tasks(status: str = "", conn: sqlite3.Connection = Depends(get_conn)):
         return HTMLResponse(_tasks_rows(conn, status or None))
 
-    @router.get("/frag/failures", dependencies=[Depends(auth)])
-    def frag_failures(conn: sqlite3.Connection = Depends(get_conn)):
+    def _failures_html(conn: sqlite3.Connection) -> str:
         failed = [dict(r) for r in conn.execute(
             """
             SELECT t.*, r.title, r.source FROM tasks t JOIN resources r ON r.id = t.resource_id
@@ -228,8 +242,11 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
             """)]
         given_up = [dict(r) for r in conn.execute(
             "SELECT * FROM wants WHERE status = 'GIVEN_UP' ORDER BY updated_at DESC LIMIT 100")]
-        return HTMLResponse(render("partials/failures.html",
-                                   failed=failed, given_up=given_up))
+        return render("partials/failures.html", failed=failed, given_up=given_up)
+
+    @router.get("/frag/failures", dependencies=[Depends(auth)])
+    def frag_failures(conn: sqlite3.Connection = Depends(get_conn)):
+        return HTMLResponse(_failures_html(conn))
 
     @router.get("/frag/status", dependencies=[Depends(auth)])
     def frag_status():
@@ -282,33 +299,39 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
             message += f"，匹配到 {matched} 条存量候选"
         return _toast(_wants_rows(conn), message)
 
-    def _after_task_action(conn, message: str, view: str, want_id: int) -> Response:
+    def _after_task_action(conn, message: str, view: str, want_id: int,
+                           status: str = "") -> Response:
+        # Always re-render the fragment the click came from, otherwise the
+        # failures/tasks page swaps in a different view (and loses its filter).
         if view == "candidates":
             try:
                 data = get_candidates(conn, want_id)
                 html = render("partials/candidates.html", **data)
             except HTTPException:
                 html = "<p class='muted'>作品不存在</p>"
+        elif view == "failures":
+            html = _failures_html(conn)
         else:
-            html = _tasks_rows(conn, None)
+            html = _tasks_rows(conn, status or None)
         return _toast(html, message)
 
     @router.post("/ui/tasks/{task_id}/retry", dependencies=[Depends(auth)])
     def ui_retry_task(task_id: int, view: str = Form(""), want_id: int = Form(0),
-                      conn: sqlite3.Connection = Depends(get_conn)):
+                      status: str = Form(""), conn: sqlite3.Connection = Depends(get_conn)):
         if statemachine.retry_task(conn, task_id, utcnow()):
-            return _after_task_action(conn, f"任务 #{task_id} 已重新排队", view, want_id)
+            return _after_task_action(conn, f"任务 #{task_id} 已重新排队", view, want_id, status)
         raise HTTPException(404, "任务不存在或状态不允许")
 
     @router.post("/ui/tasks/{task_id}/ignore", dependencies=[Depends(auth)])
     def ui_ignore_task(task_id: int, view: str = Form(""), want_id: int = Form(0),
-                       conn: sqlite3.Connection = Depends(get_conn)):
+                       status: str = Form(""), conn: sqlite3.Connection = Depends(get_conn)):
         if statemachine.ignore_task(conn, task_id, utcnow()):
-            return _after_task_action(conn, f"任务 #{task_id} 已忽略", view, want_id)
+            return _after_task_action(conn, f"任务 #{task_id} 已忽略", view, want_id, status)
         raise HTTPException(404, "任务不存在或状态不允许")
 
     @router.post("/ui/wants/{want_id}/retry-next", dependencies=[Depends(auth)])
-    def ui_retry_next(want_id: int, conn: sqlite3.Connection = Depends(get_conn)):
+    def ui_retry_next(want_id: int, view: str = Form(""),
+                      conn: sqlite3.Connection = Depends(get_conn)):
         row = conn.execute("SELECT status FROM wants WHERE id=?", (want_id,)).fetchone()
         if row is None:
             raise HTTPException(404, "want not found")
@@ -329,14 +352,17 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
         outcome = taskgen.advance_want(conn, want_id, ctx.downloader_for, now)
         messages = {"NEW_TASK": "已切换到下一个候选", "GIVE_UP": "没有可用候选了",
                     "NO_DOWNLOADER": "没有可用下载器"}
-        return _toast(_wants_rows(conn), messages.get(outcome, outcome))
+        html = _failures_html(conn) if view == "failures" else _wants_rows(conn)
+        return _toast(html, messages.get(outcome, outcome))
 
     @router.post("/ui/wants/{want_id}/reopen", dependencies=[Depends(auth)])
-    def ui_reopen(want_id: int, conn: sqlite3.Connection = Depends(get_conn)):
+    def ui_reopen(want_id: int, view: str = Form(""),
+                  conn: sqlite3.Connection = Depends(get_conn)):
         if db.fetch_want(conn, want_id) is None:
             raise HTTPException(404, "want not found")
         statemachine.revive_want(conn, want_id, utcnow())
-        return _toast(_wants_rows(conn), "作品已重新打开")
+        html = _failures_html(conn) if view == "failures" else _wants_rows(conn)
+        return _toast(html, "作品已重新打开")
 
     # ---------------------------------------------------------- settings
     def _settings_html() -> str:
@@ -373,9 +399,18 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
         for key in data:
             if key in form:
                 raw = str(form[key])
-                data[key] = raw if key in ("webhook_url", "token") else _coerce(raw)
+                if key in _CORE_INT_KEYS:
+                    try:
+                        data[key] = int(raw)
+                    except ValueError:
+                        raise HTTPException(400, f"{key} 必须是整数")
+                else:
+                    data[key] = raw
+        # Validate everything before touching the file, so a bad form value
+        # can never corrupt core.toml.
         save_core_settings(settings.config_dir, data)
         _apply_core_dict(settings, data)  # live-apply: settings IS ctx.settings
+        ctx.rebuild_notifiers()  # webhook_url may have changed
         return _toast(_settings_html(), "核心设置已保存并生效")
 
     @router.post("/ui/settings/{kind}/{name}", dependencies=[Depends(auth)])
@@ -384,10 +419,17 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
             raise HTTPException(404, "unknown kind")
         form = dict(await request.form())
         ptype = str(form.pop("type", ""))
+        sources_cfg, dls_cfg = load_plugin_configs(settings.config_dir)
+        current = (sources_cfg if kind == "source" else dls_cfg).get(name, {})
         data: dict = {"name": name, "type": ptype, "enabled": "enabled" in form}
         for key, value in form.items():
-            data[key] = _coerce(str(value))
-        save_plugin_config(settings.config_dir, kind, name, data)
+            if key == "enabled":
+                continue
+            data[key] = _coerce_like(str(value), current.get(key))
+        try:
+            save_plugin_config(settings.config_dir, kind, name, data)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         try:
             status = (ctx.reload_source(name) if kind == "source"
                       else ctx.reload_downloader(name))
@@ -403,13 +445,21 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
         clean = name.strip()
         if not clean:
             raise HTTPException(400, "名称不能为空")
-        save_plugin_config(settings.config_dir, kind, clean,
-                           {"name": clean, "type": type, "enabled": False})
+        defaults = (crawler_default_config if kind == "source"
+                    else downloader_default_config)(type)
+        try:
+            save_plugin_config(settings.config_dir, kind, clean,
+                               {**defaults, "name": clean, "type": type, "enabled": False})
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         return _toast(_settings_html(), f"已创建 {clean}（默认停用，补全配置后启用）")
 
     @router.post("/ui/settings/delete/{kind}/{name}", dependencies=[Depends(auth)])
     def ui_delete_plugin(kind: str, name: str):
-        removed = remove_plugin_config(settings.config_dir, kind, name)
+        try:
+            removed = remove_plugin_config(settings.config_dir, kind, name)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         (ctx.crawlers if kind == "source" else ctx.downloaders).pop(name, None)
         message = f"已删除 {name}" if removed else f"配置文件不存在（已从运行中移除）：{name}"
         return _toast(_settings_html(), message)

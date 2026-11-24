@@ -10,6 +10,7 @@ the keys are passed verbatim to the plugin as its config dict.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -17,7 +18,8 @@ from pathlib import Path
 
 from .core.statemachine import RetryPolicy
 
-ENV_PREFIX = "OMNFETCH_"
+ENV_PREFIX = "OMNIFETCH_"
+LEGACY_ENV_PREFIX = "OMNFETCH_"  # old spelling, still accepted as fallback
 CORE_TOML = "omnifetch.toml"  # core settings, lives inside the config dir
 
 
@@ -75,19 +77,28 @@ def core_settings_dict(settings: Settings) -> dict:
     }
 
 
+def _toml_value(key: str, value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        # Newlines/tabs would break a TOML basic string unless escaped.
+        escaped = (value.replace("\\", "\\\\").replace('"', '\\"')
+                   .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+        return f'"{escaped}"'
+    raise ValueError(f"unsupported TOML value for {key}: {type(value).__name__}")
+
+
 def dump_toml(data: dict) -> str:
-    """Minimal TOML writer — our configs are flat key = value pairs."""
+    """Minimal TOML writer — flat key = value pairs plus flat lists."""
     lines = []
     for key, value in data.items():
-        if isinstance(value, bool):
-            lines.append(f"{key} = {'true' if value else 'false'}")
-        elif isinstance(value, (int, float)):
-            lines.append(f"{key} = {value}")
-        elif isinstance(value, str):
-            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'{key} = "{escaped}"')
+        if isinstance(value, (list, tuple)):
+            inner = ", ".join(_toml_value(key, item) for item in value)
+            lines.append(f"{key} = [{inner}]")
         else:
-            raise ValueError(f"unsupported TOML value for {key}: {type(value).__name__}")
+            lines.append(f"{key} = {_toml_value(key, value)}")
     return "\n".join(lines) + "\n"
 
 
@@ -97,16 +108,26 @@ def save_core_settings(config_dir: str, data: dict) -> None:
     path.write_text(dump_toml(data), encoding="utf-8")
 
 
-def save_plugin_config(config_dir: str, kind: str, name: str, data: dict) -> None:
+_PLUGIN_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _plugin_path(config_dir: str, kind: str, name: str) -> Path:
+    if kind not in ("source", "downloader"):
+        raise ValueError(f"invalid plugin kind: {kind!r}")
+    if not name or ".." in name or not _PLUGIN_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid plugin name: {name!r}")
     directory = Path(config_dir) / ("sources.d" if kind == "source" else "downloaders.d")
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{name}.toml").write_text(dump_toml(data), encoding="utf-8")
+    return directory / f"{name}.toml"
+
+
+def save_plugin_config(config_dir: str, kind: str, name: str, data: dict) -> None:
+    path = _plugin_path(config_dir, kind, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dump_toml(data), encoding="utf-8")
 
 
 def remove_plugin_config(config_dir: str, kind: str, name: str) -> bool:
-    path = (Path(config_dir)
-            / ("sources.d" if kind == "source" else "downloaders.d")
-            / f"{name}.toml")
+    path = _plugin_path(config_dir, kind, name)
     if path.is_file():
         path.unlink()
         return True
@@ -115,7 +136,10 @@ def remove_plugin_config(config_dir: str, kind: str, name: str) -> bool:
 
 def load_settings() -> Settings:
     def env(name: str, default: str = "") -> str:
-        return os.environ.get(ENV_PREFIX + name, default)
+        value = os.environ.get(ENV_PREFIX + name)
+        if value is None:  # OMNIFETCH_ wins; OMNFETCH_ stays for old deploys
+            value = os.environ.get(LEGACY_ENV_PREFIX + name)
+        return default if value is None else value
 
     settings = Settings(config_dir=env("CONFIG", "./config"))
     core_path = Path(settings.config_dir) / CORE_TOML

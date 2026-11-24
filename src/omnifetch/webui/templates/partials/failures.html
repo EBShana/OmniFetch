@@ -11,8 +11,10 @@
       <td class="small err-text" title="{{ t.error_message or '' }}">{{ (t.error_message or '')[:50] }}</td>
       <td class="ops">
         <button class="btn mini" hx-post="/ui/tasks/{{ t.id }}/retry"
+                hx-vals='{"view": "failures"}'
                 hx-target="closest .refresh-box" hx-swap="innerHTML">重试</button>
         <button class="btn mini" hx-post="/ui/tasks/{{ t.id }}/ignore"
+                hx-vals='{"view": "failures"}'
                 hx-target="closest .refresh-box" hx-swap="innerHTML">忽略</button>
       </td>
     </tr>
@@ -31,8 +33,10 @@
       <td class="muted small">{{ w.updated_at[:16] }}</td>
       <td class="ops">
         <button class="btn mini" hx-post="/ui/wants/{{ w.id }}/retry-next"
+                hx-vals='{"view": "failures"}'
                 hx-target="closest .refresh-box" hx-swap="innerHTML">再试一轮</button>
         <button class="btn mini" hx-post="/ui/wants/{{ w.id }}/reopen"
+                hx-vals='{"view": "failures"}'
                 hx-target="closest .refresh-box" hx-swap="innerHTML">重新打开</button>
       </td>
     </tr>

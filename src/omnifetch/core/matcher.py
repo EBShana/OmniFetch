@@ -30,6 +30,7 @@ def create_want(
     """Create a want if absent. Returns (want, matched_archived) where
     matched_archived is how many previously-ingested resources were
     attached via backfill (0 when the want already existed)."""
+    validate_match_rule(match_rule or {})
     now = iso(utcnow())
     cur = conn.execute(
         """
@@ -92,12 +93,29 @@ def list_wants(conn: sqlite3.Connection, status: WantStatus | None = None) -> li
     return [want_from_row(row) for row in rows]
 
 
+def validate_match_rule(rule: dict) -> None:
+    """Raise ValueError when title_regex is not a usable regular expression."""
+    pattern = rule.get("title_regex")
+    if pattern:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"title_regex 无效：{exc}") from exc
+
+
 def _rule_matches(rule: dict, normalized_title: str) -> bool:
-    patterns: list[str] = []
-    if rule.get("title_regex"):
-        patterns.append(rule["title_regex"])
-    patterns.extend(rule.get("aliases") or [])
-    return any(re.search(p, normalized_title, re.IGNORECASE) for p in patterns)
+    """title_regex is a regex; aliases are literal substrings, so titles
+    containing '(' or '+' are matched as written instead of blowing up."""
+    pattern = rule.get("title_regex")
+    if pattern:
+        try:
+            if re.search(pattern, normalized_title, re.IGNORECASE):
+                return True
+        except re.error:
+            log.warning("ignoring invalid title_regex %r", pattern)
+    haystack = normalized_title.casefold()
+    return any(str(alias).casefold() in haystack
+               for alias in (rule.get("aliases") or []) if str(alias).strip())
 
 
 def assign_want(conn: sqlite3.Connection, resource) -> int | None:

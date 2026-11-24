@@ -283,6 +283,8 @@ class P115Downloader(DownloaderPlugin):
     type = "p115"
     accepts = (ResourceType.MAGNET, ResourceType.TORRENT, ResourceType.HTTP,
                ResourceType.NETDISK)
+    DEFAULT_CONFIG = {"cookie_file": "data/p115_cookies.json",
+                      "target_dir_id": "0", "savepath": "", "proxy": ""}
 
     def __init__(self, name: str, config: dict):
         super().__init__(name, config)

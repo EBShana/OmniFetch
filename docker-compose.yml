@@ -7,10 +7,10 @@ services:
       - omnifetch-data:/data
       - ./config:/app/config
     environment:
-      OMNFETCH_DB: /data/omnifetch.db
-      OMNFETCH_CONFIG: /app/config
-      OMNFETCH_POLL_INTERVAL: "30"
-      # OMNFETCH_WEBHOOK: "https://your-bot.example.com/webhook"
+      OMNIFETCH_DB: /data/omnifetch.db
+      OMNIFETCH_CONFIG: /app/config
+      OMNIFETCH_POLL_INTERVAL: "30"
+      # OMNIFETCH_WEBHOOK: "https://your-bot.example.com/webhook"
     restart: unless-stopped
 
   # Optional download tools, started with: docker compose --profile downloaders up -d

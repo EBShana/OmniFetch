@@ -23,6 +23,7 @@ class QBittorrentDownloader(DownloaderPlugin):
 
     type = "qbittorrent"
     accepts = (ResourceType.TORRENT, ResourceType.MAGNET, ResourceType.HTTP)
+    DEFAULT_CONFIG = {"url": "", "username": "", "password": ""}
 
     def submit(self, resource):
         raise NotImplementedError("qbittorrent module not implemented yet")

@@ -21,6 +21,8 @@ class RssCrawler(CrawlerPlugin):
     """
 
     type = "rss"
+    DEFAULT_CONFIG = {"url": "", "interval": 900, "resource_type": "http",
+                      "want_key": ""}
 
     def fetch(self) -> list[Resource]:
         feed = feedparser.parse(self.config["url"])

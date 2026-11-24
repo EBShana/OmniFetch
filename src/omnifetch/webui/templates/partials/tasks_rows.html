@@ -17,10 +17,12 @@
     <td class="ops">
       {% if t.status in ('FAILED', 'IGNORED', 'FAILED_RETRYABLE') %}
       <button class="btn mini" hx-post="/ui/tasks/{{ t.id }}/retry"
+              hx-vals='{"view": "tasks", "status": "{{ status|default("") }}"}'
               hx-target="closest .refresh-box" hx-swap="innerHTML">重试</button>
       {% endif %}
       {% if t.status in ('FAILED', 'FAILED_RETRYABLE', 'QUEUED') %}
       <button class="btn mini" hx-post="/ui/tasks/{{ t.id }}/ignore"
+              hx-vals='{"view": "tasks", "status": "{{ status|default("") }}"}'
               hx-target="closest .refresh-box" hx-swap="innerHTML">忽略</button>
       {% endif %}
     </td>
