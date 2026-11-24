@@ -1,9 +1,10 @@
 """Zombie task sweeper.
 
-A task stuck in DOWNLOADING whose claim is older than the stale threshold is
-a zombie: the scheduler process died (container restart/upgrade) while the
-download was tracked. Requeue it and best-effort cancel the tool-side job —
-on the next dispatch the same or another downloader will pick it up.
+A task stuck in DOWNLOADING whose last heartbeat (updated_at, refreshed on
+every successful poll) is older than the stale threshold is a zombie: the
+scheduler process died (container restart/upgrade) while the download was
+tracked. Requeue it and best-effort cancel the tool-side job — on the next
+dispatch the same or another downloader will pick it up.
 
 Idempotent by construction: only rows still in DOWNLOADING are touched.
 """
@@ -24,7 +25,7 @@ def sweep(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> int:
     rows = conn.execute(
         """
         SELECT id, downloader, external_id FROM tasks
-        WHERE status='DOWNLOADING' AND (claimed_at IS NULL OR claimed_at < ?)
+        WHERE status='DOWNLOADING' AND (updated_at IS NULL OR updated_at < ?)
         """,
         (cutoff,),
     ).fetchall()

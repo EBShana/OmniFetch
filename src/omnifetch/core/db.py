@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_count INTEGER NOT NULL DEFAULT 0,
     next_retry_at TEXT,
     claimed_at TEXT,
+    last_progress_at TEXT,
     external_id TEXT,
     progress REAL NOT NULL DEFAULT 0,
     error_kind TEXT CHECK (error_kind IN ('transient', 'permanent')),
@@ -107,6 +108,10 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # Lightweight migration for databases created before last_progress_at.
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+    if "last_progress_at" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN last_progress_at TEXT")
     conn.commit()
 
 
@@ -153,6 +158,7 @@ def task_from_row(row: sqlite3.Row) -> Task:
         retry_count=row["retry_count"],
         next_retry_at=parse_iso(row["next_retry_at"]),
         claimed_at=parse_iso(row["claimed_at"]),
+        last_progress_at=parse_iso(row["last_progress_at"]),
         external_id=row["external_id"],
         progress=row["progress"],
         error_kind=ErrorKind(row["error_kind"]) if row["error_kind"] else None,

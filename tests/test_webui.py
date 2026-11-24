@@ -143,6 +143,10 @@ def test_token_auth(tmp_path):
     assert client.post("/ui/wants", data={"work_key": "x"}).status_code == 401
 
     headers = {"X-OmniFetch-Token": "s3cret"}
+    assert client.get("/api/auth/verify").status_code == 401
+    assert client.get("/api/auth/verify",
+                      headers={"X-OmniFetch-Token": "wrong"}).status_code == 401
+    assert client.get("/api/auth/verify", headers=headers).json() == {"ok": True}
     assert client.get("/api/wants", headers=headers).status_code == 200
     assert client.get("/frag/wants", headers=headers).status_code == 200
     assert client.get("/api/wants", params={"token": "s3cret"}).status_code == 200
@@ -153,3 +157,9 @@ def test_token_auth(tmp_path):
     assert client.get("/frag/wants").status_code == 200
 
     assert client.get("/").status_code == 200  # shell pages stay open
+
+
+def test_app_js_verifies_token_and_clears_cookie(client):
+    js = client.get("/static/app.js").text
+    assert "/api/auth/verify" in js
+    assert "omnifetch_token=; path=/; max-age=0" in js

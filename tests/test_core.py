@@ -1,16 +1,19 @@
 """Core mechanics: dedup, atomic claim, retry/backoff, fallback chain."""
 from __future__ import annotations
 
+import threading
 from datetime import timedelta
 
 import pytest
 
-from omnifetch.core import ingest, statemachine, taskgen
-from omnifetch.core.db import connect, fetch_task, fetch_want, init_db
+from omnifetch.config import Settings
+from omnifetch.core import ingest, matcher, statemachine, taskgen
+from omnifetch.core.db import connect, fetch_task, fetch_want, fetch_want_by_key, init_db
 from omnifetch.core.matcher import find_or_create_want
 from omnifetch.core.models import ErrorKind, Resource, ResourceType, WantStatus
-from omnifetch.core.statemachine import RetryPolicy
+from omnifetch.core.statemachine import FailOutcome, RetryPolicy
 from omnifetch.core.util import iso, utcnow
+from omnifetch.scheduler import runner, trigger
 
 POLICY = RetryPolicy(max_retries=2, base_seconds=60, max_seconds=7200)
 DL = lambda resource: "test-dl"  # noqa: E731

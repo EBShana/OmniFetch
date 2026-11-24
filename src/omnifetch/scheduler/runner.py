@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +51,10 @@ class Context:
             except Exception:
                 log.exception("notifier failed for event %s", event_type)
 
+    def rebuild_notifiers(self) -> None:
+        """Rebuild the notifier list after webhook_url changed at runtime."""
+        self.notifiers = _build_notifiers(self.settings)
+
     # ------------------------------------------------------- live reload
     def reload_source(self, name: str) -> str:
         """Rebuild one crawler from its (possibly edited) config file.
@@ -77,6 +83,13 @@ class Context:
         return "已保存并启用"
 
 
+def _build_notifiers(settings: Settings) -> list[Notifier]:
+    notifiers: list[Notifier] = [NullNotifier()]
+    if settings.webhook_url:
+        notifiers.append(WebhookNotifier(settings.webhook_url))
+    return notifiers
+
+
 def build_context(settings: Settings) -> Context:
     Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(settings.db_path)
@@ -98,15 +111,24 @@ def build_context(settings: Settings) -> Context:
         except Exception:
             log.exception("failed to load downloader %s (%s)", name, cfg.get("type"))
 
-    notifiers: list[Notifier] = [NullNotifier()]
-    if settings.webhook_url:
-        notifiers.append(WebhookNotifier(settings.webhook_url))
-
     log.info(
         "context ready: %d crawlers, %d downloaders",
         len(crawlers), len(downloaders),
     )
-    return Context(settings, crawlers, downloaders, notifiers)
+    return Context(settings, crawlers, downloaders, _build_notifiers(settings))
+
+
+def run_forever(ctx: Context, stop_event: threading.Event | None = None) -> None:
+    """Run scheduler ticks until stop_event is set (CLI run / serve thread)."""
+    while stop_event is None or not stop_event.is_set():
+        try:
+            run_once(ctx)
+        except Exception:
+            log.exception("scheduler tick failed")
+        if stop_event is None:
+            time.sleep(ctx.settings.poll_interval)
+        else:
+            stop_event.wait(ctx.settings.poll_interval)
 
 
 def run_once(ctx: Context) -> None:

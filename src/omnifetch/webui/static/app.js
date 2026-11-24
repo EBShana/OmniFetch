@@ -34,6 +34,7 @@
     document.body.addEventListener('htmx:responseError', function (e) {
       if (e.detail.xhr && e.detail.xhr.status === 401) {
         localStorage.removeItem('omnifetch_token');
+        document.cookie = 'omnifetch_token=; path=/; max-age=0; samesite=lax';
         openTokenModal();
       }
     });
@@ -44,7 +45,7 @@
       var input = document.getElementById('token-input');
       var err = document.getElementById('token-error');
       var token = input.value.trim();
-      fetch('/api/health', { headers: { 'X-OmniFetch-Token': token } }).then(function (r) {
+      fetch('/api/auth/verify', { headers: { 'X-OmniFetch-Token': token } }).then(function (r) {
         if (r.ok) {
           localStorage.setItem('omnifetch_token', token);
           document.cookie = 'omnifetch_token=' + encodeURIComponent(token) +

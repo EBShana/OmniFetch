@@ -87,11 +87,14 @@ def poll_active(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> None
         if result.external_id and result.external_id != task.external_id:
             statemachine.retarget_task(conn, task.id, result.external_id, now)
 
+        statemachine.heartbeat(conn, task.id, now)
+
         if result.status.value == "DONE":
             outcome = statemachine.complete_task(conn, task.id, now)
             if outcome == "WANT_ACQUIRED":
                 ctx.notify("want.acquired", {"task_id": task.id, "resource_id": task.resource_id})
-        elif result.status.value == "FAILED":
+            continue
+        if result.status.value == "FAILED":
             outcome = taskgen.on_task_failed(
                 conn, task.id,
                 result.error_kind or ErrorKind.PERMANENT,
@@ -102,17 +105,26 @@ def poll_active(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> None
                 ctx.notify("task.failed", {"task_id": task.id})
             elif outcome == "NEW_TASK":
                 ctx.notify("want.fallback", {"failed_task_id": task.id})
-        # PROGRESS — but watch for stalls: a download that has made no
-        # progress since its claim for longer than stalled_after is treated
-        # as a transient failure (dead swarm / stuck metadata), so the
-        # backoff + fallback chain can move on.
-        claimed = task.claimed_at or now
-        if result.progress <= (task.progress or 0.0) and \
-                (now - claimed) > ctx.settings.stalled_after:
+            continue
+
+        # PROGRESS — a download that has not advanced since its last recorded
+        # progress for longer than stalled_after is treated as a transient
+        # failure (dead swarm / stuck metadata), so the backoff + fallback
+        # chain can move on.
+        if result.progress > (task.progress or 0.0):
+            statemachine.update_progress(conn, task.id, result.progress, now)
+            continue
+
+        baseline = task.last_progress_at or task.claimed_at or now
+        if (now - baseline) > ctx.settings.stalled_after:
+            stalled_id = result.external_id or task.external_id
+            if stalled_id:
+                try:
+                    downloader.cancel(stalled_id)
+                except Exception:
+                    log.warning("cancel failed for stalled task %s", task.id)
             taskgen.on_task_failed(
                 conn, task.id, ErrorKind.TRANSIENT,
                 f"stalled: no progress for {ctx.settings.stalled_after}",
                 ctx.settings.retry, ctx.downloader_for, now,
             )
-        else:
-            statemachine.update_progress(conn, task.id, result.progress, now)

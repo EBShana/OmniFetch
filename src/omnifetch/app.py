@@ -13,9 +13,10 @@ from .webapi.app import create_api_router
 from .webui.routes import create_ui_router
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or load_settings()
-    ctx = build_context(settings)
+def create_app(settings: Settings | None = None, ctx=None) -> FastAPI:
+    if settings is None:
+        settings = ctx.settings if ctx is not None else load_settings()
+    ctx = ctx or build_context(settings)
 
     app = FastAPI(title="OmniFetch", version="0.1.0")
     app.state.ctx = ctx  # exposed for the settings UI live-reload and tests

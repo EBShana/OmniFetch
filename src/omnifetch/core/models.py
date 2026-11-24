@@ -124,6 +124,7 @@ class Task:
     retry_count: int = 0
     next_retry_at: datetime | None = None
     claimed_at: datetime | None = None
+    last_progress_at: datetime | None = None
     external_id: str | None = None
     progress: float = 0.0
     error_kind: ErrorKind | None = None

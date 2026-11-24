@@ -41,6 +41,7 @@ class RetryPolicy:
 class FailOutcome(str, Enum):
     RETRY_SAME = "RETRY_SAME"   # waiting for backoff, same candidate retried
     FAILED = "FAILED"           # terminal failure recorded
+    NOOP = "NOOP"               # task was not DOWNLOADING; nothing to do
 
 
 def claim_task(conn: sqlite3.Connection, now: datetime) -> Task | None:
@@ -50,7 +51,8 @@ def claim_task(conn: sqlite3.Connection, now: datetime) -> Task | None:
     cur = conn.execute(
         """
         UPDATE tasks
-        SET status='DOWNLOADING', claimed_at=?, next_retry_at=NULL, updated_at=?
+        SET status='DOWNLOADING', claimed_at=?, last_progress_at=?,
+            next_retry_at=NULL, updated_at=?
         WHERE id = (
                 SELECT id FROM tasks
                 WHERE (status='QUEUED' AND (next_retry_at IS NULL OR next_retry_at <= ?))
@@ -61,7 +63,7 @@ def claim_task(conn: sqlite3.Connection, now: datetime) -> Task | None:
           AND status IN ('QUEUED', 'FAILED_RETRYABLE')
         RETURNING id
         """,
-        (stamp, stamp, stamp, stamp),
+        (stamp, stamp, stamp, stamp, stamp),
     )
     row = cur.fetchone()
     conn.commit()
@@ -101,8 +103,20 @@ def update_progress(
     conn: sqlite3.Connection, task_id: int, progress: float, now: datetime
 ) -> None:
     conn.execute(
-        "UPDATE tasks SET progress=?, updated_at=? WHERE id=? AND status='DOWNLOADING'",
-        (progress, iso(now), task_id),
+        """
+        UPDATE tasks SET progress=?, last_progress_at=?, updated_at=?
+        WHERE id=? AND status='DOWNLOADING'
+        """,
+        (progress, iso(now), iso(now), task_id),
+    )
+    conn.commit()
+
+
+def heartbeat(conn: sqlite3.Connection, task_id: int, now: datetime) -> None:
+    """Refresh the liveness timestamp after a successful poll."""
+    conn.execute(
+        "UPDATE tasks SET updated_at=? WHERE id=? AND status='DOWNLOADING'",
+        (iso(now), task_id),
     )
     conn.commit()
 
@@ -162,7 +176,7 @@ def fail_task(
     candidate fallback itself is orchestrated by taskgen.on_task_failed."""
     task = fetch_task(conn, task_id)
     if task is None or task.status != TaskStatus.DOWNLOADING:
-        return FailOutcome.FAILED  # already handled elsewhere; stay idempotent
+        return FailOutcome.NOOP  # already handled elsewhere; stay idempotent
 
     if kind == ErrorKind.TRANSIENT and task.retry_count < policy.max_retries:
         delay = policy.backoff_seconds(task.retry_count)

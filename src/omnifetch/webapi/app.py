@@ -102,6 +102,11 @@ def create_api_router(settings: Settings, ctx) -> APIRouter:
     def health() -> dict:
         return {"ok": True, "auth_required": bool(settings.token)}
 
+    @router.get("/auth/verify", dependencies=[Depends(auth)])
+    def auth_verify() -> dict:
+        """Authenticated probe used by the token modal to validate input."""
+        return {"ok": True}
+
     # ------------------------------------------------------------ reads
     @router.get("/stats", dependencies=[Depends(auth)])
     def stats(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:

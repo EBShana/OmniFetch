@@ -73,7 +73,8 @@ def advance_want(
 ) -> str:
     """Push the fallback chain of one want by one step.
 
-    Returns 'NEW_TASK' | 'ACTIVE' | 'GIVE_UP' | 'NO_DOWNLOADER' | 'INACTIVE'.
+    Returns 'NEW_TASK' | 'ACTIVE' | 'WAITING' | 'GIVE_UP' |
+    'NO_DOWNLOADER' | 'INACTIVE'.
     """
     want = fetch_want(conn, want_id)
     if want is None or want.status != WantStatus.WANTED:
@@ -83,6 +84,13 @@ def advance_want(
 
     candidates = _untried_candidates(conn, want_id)
     if not candidates:
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM resources WHERE want_id=?", (want_id,)
+        ).fetchone()["n"]
+        if total == 0:
+            # Nothing discovered yet — keep waiting instead of burning the
+            # want. A later crawler run will attach resources and retry.
+            return "WAITING"
         conn.execute(
             "UPDATE wants SET status='GIVEN_UP', updated_at=? WHERE id=?",
             (iso(now), want_id),
