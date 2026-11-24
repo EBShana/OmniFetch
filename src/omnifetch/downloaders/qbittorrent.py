@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from ..core.models import ResourceType
+from . import register
 from .base import DownloaderPlugin
 
 
+@register
 class QBittorrentDownloader(DownloaderPlugin):
     """qBittorrent via its Web API. Config keys:
 

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<details class="panel">
+  <summary>＋ 新建作品</summary>
+  <form class="grid-form" hx-post="/ui/wants" hx-target="#wants-list">
+    <label>work_key *<input name="work_key" required placeholder="如: tsue to tsurugi no wistoria"></label>
+    <label>显示名<input name="display_title" placeholder="如: 杖与剑的魔剑谭"></label>
+    <label>匹配别名（逗号分隔）<input name="aliases" placeholder="wistoria, 杖与剑"></label>
+    <label>优先来源（逗号分隔）<input name="prefer_sources" placeholder="vcb-nyaa, vcb-dmhy"></label>
+    <button type="submit" class="btn primary">创建</button>
+  </form>
+</details>
+<div id="wants-list" class="refresh-box" hx-get="/frag/wants" hx-trigger="load, every 10s" hx-swap="innerHTML">
+  <p class="muted">加载中…</p>
+</div>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% if tasks %}
+<table class="tbl">
+  <tr><th>#</th><th>资源</th><th>来源</th><th>下载器</th><th>状态</th><th>进度</th><th>重试</th><th>信息</th><th>操作</th></tr>
+  {% for t in tasks %}
+  <tr>
+    <td class="muted">{{ t.id }}</td>
+    <td>{{ (t.rtitle or '').splitlines()[0][:36] }}</td>
+    <td><span class="badge src">{{ t.rsource or '—' }}</span></td>
+    <td class="small">{{ t.downloader }}</td>
+    <td><span class="badge {{ badge(t.status) }}">{{ t.status }}</span></td>
+    <td style="min-width:8em">
+      <div class="bar"><div style="width: {{ pct(t.progress) }}"></div></div>
+      <span class="small muted">{{ pct(t.progress) }}</span>
+    </td>
+    <td class="small">{{ t.retry_count }}</td>
+    <td class="small err-text" title="{{ t.error_message or '' }}">{{ (t.error_message or '')[:42] }}</td>
+    <td class="ops">
+      {% if t.status in ('FAILED', 'IGNORED', 'FAILED_RETRYABLE') %}
+      <button class="btn mini" hx-post="/ui/tasks/{{ t.id }}/retry"
+              hx-target="closest .refresh-box" hx-swap="innerHTML">重试</button>
+      {% endif %}
+      {% if t.status in ('FAILED', 'FAILED_RETRYABLE', 'QUEUED') %}
+      <button class="btn mini" hx-post="/ui/tasks/{{ t.id }}/ignore"
+              hx-target="closest .refresh-box" hx-swap="innerHTML">忽略</button>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">没有匹配的任务。</p>
+{% endif %}

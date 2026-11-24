@@ -49,6 +49,33 @@ class Context:
             except Exception:
                 log.exception("notifier failed for event %s", event_type)
 
+    # ------------------------------------------------------- live reload
+    def reload_source(self, name: str) -> str:
+        """Rebuild one crawler from its (possibly edited) config file.
+        Returns a short status string for the UI."""
+        sources, _ = load_plugin_configs(self.settings.config_dir)
+        cfg = sources.get(name)
+        if cfg is None:
+            self.crawlers.pop(name, None)
+            return "配置已删除"
+        if not cfg.get("enabled", True):
+            self.crawlers.pop(name, None)
+            return "已保存（停用）"
+        self.crawlers[name] = create_crawler(cfg["type"], name, cfg)
+        return "已保存并启用"
+
+    def reload_downloader(self, name: str) -> str:
+        _, downloaders = load_plugin_configs(self.settings.config_dir)
+        cfg = downloaders.get(name)
+        if cfg is None:
+            self.downloaders.pop(name, None)
+            return "配置已删除"
+        if not cfg.get("enabled", True):
+            self.downloaders.pop(name, None)
+            return "已保存（停用）"
+        self.downloaders[name] = create_downloader(cfg["type"], name, cfg)
+        return "已保存并启用"
+
 
 def build_context(settings: Settings) -> Context:
     Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)

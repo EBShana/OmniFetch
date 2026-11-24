@@ -1,0 +1,10 @@
+# 115 网盘离线下载。登录：omnifetch 115-login p115
+name = "p115"
+type = "p115"
+enabled = false
+
+cookie_file = "./data/p115_cookies.json"
+target_dir_id = "0"        # 网盘保存目录 id，0 = 根目录
+savepath = ""              # 目录下的相对子路径，可留空
+# proxy 仅在抓取 .torrent 文件解析 infohash 时走代理（如 nyaa 需要），115 本身国内直连
+proxy = ""

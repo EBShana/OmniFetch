@@ -22,3 +22,4 @@ def crawler_types() -> list[str]:
 
 
 from .rss import RssCrawler  # noqa: E402,F401  (register built-ins)
+from .vcb import VcbCrawler  # noqa: E402,F401

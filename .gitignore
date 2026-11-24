@@ -4,3 +4,8 @@ __pycache__/
 .pytest_cache/
 data/
 downloads/
+aria2-config/
+config-it/
+tmp/
+config/sources.d/vcb.toml
+config/omnifetch.toml

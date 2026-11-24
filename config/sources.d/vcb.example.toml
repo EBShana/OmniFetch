@@ -1,0 +1,22 @@
+# VCB-Studio release index (Google Sheets -> vcb-s.com -> BT mirrors).
+# Requires a proxy for Google/both sites, and a cf_clearance cookie for
+# vcb-s.com's Cloudflare challenge (see backend notes in vcb.py).
+name = "vcb"
+type = "vcb"
+enabled = false
+
+sheet_id = "1mEqjCEHe0D_8bPkpcuuECxGZva-jSg3Z3Sc0u3tpZns"
+gid = "766492382"
+proxy = "http://127.0.0.1:7897"
+interval = 2592000              # 30 days: one full sweep per month
+max_pages_per_run = 0           # 0 = the whole sheet (newest first)
+delay = 1.0
+
+# Cloudflare backend for vcb-s.com:
+#   "cookie" (default, fast): copy cf_clearance from your browser after
+#     opening vcb-s.com, plus that browser's User-Agent. Expires eventually
+#     (hours to days); refresh when pages return 403.
+#   "playwright": self-sufficient but slow; often blocked by strict CF rules.
+backend = "cookie"
+cf_clearance = ""
+user_agent = ""

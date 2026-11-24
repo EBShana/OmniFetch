@@ -27,12 +27,15 @@ DownloaderFor = Callable[[Resource], str | None]
 
 
 def score(resource: Resource, rank_rule: dict) -> tuple:
-    """Higher is better. Default order: preferred group, resolution, size."""
+    """Higher is better. Order: preferred source, preferred group,
+    resolution, size."""
+    sources = [s.lower() for s in (rank_rule.get("prefer_sources") or [])]
+    source_bonus = 1 if resource.source.lower() in sources else 0
     q = resource.quality
     groups = [g.lower() for g in (rank_rule.get("prefer_groups") or [])]
     group_bonus = 1 if (q.group and q.group.lower() in groups) else 0
     size = int(resource.extra.get("size") or 0)
-    return (group_bonus, q.resolution or 0, size)
+    return (source_bonus, group_bonus, q.resolution or 0, size)
 
 
 def _want_has_active_chain(conn: sqlite3.Connection, want_id: int) -> bool:

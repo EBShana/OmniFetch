@@ -6,9 +6,11 @@ from time import mktime
 import feedparser
 
 from ..core.models import Resource, ResourceType
+from . import register
 from .base import CrawlerPlugin
 
 
+@register
 class RssCrawler(CrawlerPlugin):
     """Generic RSS/Atom source. Config keys:
 

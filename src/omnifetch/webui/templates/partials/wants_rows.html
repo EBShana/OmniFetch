@@ -1,0 +1,40 @@
+{% if wants %}
+<table class="tbl">
+  <tr><th style="width:2em"></th><th>作品</th><th>状态</th><th>候选</th><th>当前推进</th><th>操作</th></tr>
+  {% for w in wants %}
+  <tr>
+    <td>
+      <button class="btn mini" hx-get="/frag/wants/{{ w.id }}/candidates"
+              hx-target="#cand-{{ w.id }}" hx-swap="innerHTML">▸</button>
+    </td>
+    <td>
+      <div>{{ w.display_title or w.work_key }}</div>
+      <div class="muted small">{{ w.work_key }}</div>
+    </td>
+    <td><span class="badge {{ badge(w.status) }}">{{ w.status }}</span></td>
+    <td>{{ w.candidates }}</td>
+    <td>
+      {% if w.active %}
+        <span class="badge src">{{ w.active['source'] }}</span>
+        <span class="badge {{ badge(w.active['status']) }}">{{ w.active['status'] }}</span>
+        <div class="bar"><div style="width: {{ pct(w.active['progress']) }}"></div></div>
+        <span class="small muted">{{ pct(w.active['progress']) }}</span>
+      {% else %}<span class="muted">—</span>{% endif %}
+    </td>
+    <td class="ops">
+      {% if w.status != 'ACQUIRED' %}
+      <button class="btn mini" hx-post="/ui/wants/{{ w.id }}/retry-next"
+              hx-target="closest .refresh-box" hx-swap="innerHTML">换下一个候选</button>
+      {% endif %}
+      {% if w.status in ('ACQUIRED', 'GIVEN_UP') %}
+      <button class="btn mini" hx-post="/ui/wants/{{ w.id }}/reopen"
+              hx-target="closest .refresh-box" hx-swap="innerHTML">重新打开</button>
+      {% endif %}
+    </td>
+  </tr>
+  <tr class="cand-row"><td></td><td colspan="5"><div id="cand-{{ w.id }}" class="cand-box" hx-preserve></div></td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">还没有作品。用上方表单创建，爬虫抓到的匹配资源会自动成为候选。</p>
+{% endif %}

@@ -1,0 +1,40 @@
+<section class="panel">
+  <h4>爬取源</h4>
+  {% if sources %}
+  <table class="tbl">
+    <tr><th>名称</th><th>类型</th><th>间隔</th><th>最近运行</th><th>结果</th><th>下次约</th></tr>
+    {% for s in sources %}
+    <tr>
+      <td>{{ s.name }}</td>
+      <td class="small">{{ s.type }}</td>
+      <td class="small">{{ s.interval }}s</td>
+      <td class="small muted">{{ s.run.started_at[5:16] if s.run else '—' }}</td>
+      <td class="small">
+        {% if s.run %}
+          {% if s.run.error %}<span class="badge b-red">失败</span>
+          {% else %}新 {{ s.run.created }} / 重 {{ s.run.duplicates }} · {{ s.run.duration_ms }}ms{% endif %}
+        {% else %}<span class="muted">未运行</span>{% endif %}
+      </td>
+      <td class="small muted">{{ s.next_due[5:16] if s.next_due else '—' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">没有启用的爬取源</p>{% endif %}
+</section>
+<section class="panel">
+  <h4>下载器</h4>
+  {% if downloaders %}
+  <table class="tbl">
+    <tr><th>名称</th><th>类型</th><th>健康</th><th>详情</th><th>支持</th></tr>
+    {% for d in downloaders %}
+    <tr>
+      <td>{{ d.name }}</td>
+      <td class="small">{{ d.type }}</td>
+      <td>{% if d.ok %}<span class="badge b-green">在线</span>{% else %}<span class="badge b-red">离线</span>{% endif %}</td>
+      <td class="small err-text">{{ d.detail }}</td>
+      <td class="small muted">{{ d.accepts }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">没有启用的下载器</p>{% endif %}
+</section>

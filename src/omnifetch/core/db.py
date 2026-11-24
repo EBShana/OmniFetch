@@ -82,6 +82,18 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS ix_tasks_status ON tasks(status, next_retry_at);
 CREATE INDEX IF NOT EXISTS ix_tasks_resource ON tasks(resource_id);
+
+CREATE TABLE IF NOT EXISTS source_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    fetched INTEGER NOT NULL DEFAULT 0,
+    created INTEGER NOT NULL DEFAULT 0,
+    duplicates INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_source_runs ON source_runs(source, id);
 """
 
 

@@ -1,0 +1,42 @@
+<section class="panel">
+  <h4>失败的任务（{{ failed|length }}）</h4>
+  {% if failed %}
+  <table class="tbl">
+    <tr><th>#</th><th>资源</th><th>来源</th><th>错误</th><th>操作</th></tr>
+    {% for t in failed %}
+    <tr>
+      <td class="muted">{{ t.id }}</td>
+      <td>{{ (t.title or '').splitlines()[0][:36] }}</td>
+      <td><span class="badge src">{{ t.source }}</span></td>
+      <td class="small err-text" title="{{ t.error_message or '' }}">{{ (t.error_message or '')[:50] }}</td>
+      <td class="ops">
+        <button class="btn mini" hx-post="/ui/tasks/{{ t.id }}/retry"
+                hx-target="closest .refresh-box" hx-swap="innerHTML">重试</button>
+        <button class="btn mini" hx-post="/ui/tasks/{{ t.id }}/ignore"
+                hx-target="closest .refresh-box" hx-swap="innerHTML">忽略</button>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">没有失败的任务</p>{% endif %}
+</section>
+<section class="panel">
+  <h4>放弃的作品（候选耗尽，{{ given_up|length }}）</h4>
+  {% if given_up %}
+  <table class="tbl">
+    <tr><th>作品</th><th>时间</th><th>操作</th></tr>
+    {% for w in given_up %}
+    <tr>
+      <td>{{ w.display_title or w.work_key }}</td>
+      <td class="muted small">{{ w.updated_at[:16] }}</td>
+      <td class="ops">
+        <button class="btn mini" hx-post="/ui/wants/{{ w.id }}/retry-next"
+                hx-target="closest .refresh-box" hx-swap="innerHTML">再试一轮</button>
+        <button class="btn mini" hx-post="/ui/wants/{{ w.id }}/reopen"
+                hx-target="closest .refresh-box" hx-swap="innerHTML">重新打开</button>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">没有放弃的作品</p>{% endif %}
+</section>

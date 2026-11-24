@@ -21,4 +21,5 @@ def downloader_types() -> list[str]:
 
 
 from .http import Aria2Downloader  # noqa: E402,F401  (register built-ins)
+from .p115 import P115Downloader  # noqa: E402,F401
 from .qbittorrent import QBittorrentDownloader  # noqa: E402,F401

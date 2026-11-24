@@ -1,0 +1,27 @@
+<p class="muted small" style="margin:.3em 0">候选链（按排名规则排序）· 作品状态 {{ want.status }}</p>
+<ol class="cand-list">
+  {% for c in candidates %}
+  <li class="cand {{ 'redundant' if c.resource_status == 'REDUNDANT' }}">
+    <span class="badge src">{{ c.source }}</span>
+    <span class="badge b-gray">{{ c.resource_type }}</span>
+    {% if c.task_id %}
+      <span class="badge {{ badge(c.task_status) }}">{{ c.task_status }}</span>
+      <div class="bar inline"><div style="width: {{ pct(c.progress) }}"></div></div>
+      <span class="small">{{ pct(c.progress) }}</span>
+      {% if c.retry_count %}<span class="small muted">↻{{ c.retry_count }}</span>{% endif %}
+      <span class="small muted">{{ c.downloader }}</span>
+      {% if c.error_message %}<span class="small err-text" title="{{ c.error_message }}">{{ c.error_message[:60] }}</span>{% endif %}
+      <span class="ops">
+        <button class="btn mini" hx-post="/ui/tasks/{{ c.task_id }}/retry"
+                hx-vals='{"view": "candidates", "want_id": {{ want.id }}}'
+                hx-target="#cand-{{ want.id }}" hx-swap="innerHTML">重试</button>
+        <button class="btn mini" hx-post="/ui/tasks/{{ c.task_id }}/ignore"
+                hx-vals='{"view": "candidates", "want_id": {{ want.id }}}'
+                hx-target="#cand-{{ want.id }}" hx-swap="innerHTML">忽略</button>
+      </span>
+    {% else %}
+      <span class="small muted">未尝试 · {{ short_uri(c.uris[0] if c.uris else '') }}</span>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ol>

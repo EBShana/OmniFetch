@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="refresh-box" hx-get="/frag/settings" hx-trigger="load" hx-swap="innerHTML">
+  <p class="muted">加载中…</p>
+</div>
+{% endblock %}

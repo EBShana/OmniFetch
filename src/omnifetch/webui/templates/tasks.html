@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+{% set filters = [("", "全部"), ("DOWNLOADING", "下载中"), ("QUEUED", "排队"),
+                  ("FAILED_RETRYABLE", "退避中"), ("FAILED", "失败"),
+                  ("COMPLETED", "完成"), ("IGNORED", "已忽略")] %}
+<div class="tabs">
+  {% for value, label in filters %}
+  <a href="/tasks?status={{ value }}" class="tab {{ 'active' if status == value }}">{{ label }}</a>
+  {% endfor %}
+</div>
+<div id="tasks-list" class="refresh-box" hx-get="/frag/tasks{% if status %}?status={{ status }}{% endif %}"
+     hx-trigger="load, every 5s" hx-swap="innerHTML">
+  <p class="muted">加载中…</p>
+</div>
+{% endblock %}

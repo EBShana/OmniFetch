@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}OmniFetch{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<nav class="topnav">
+  <span class="brand">Omni<b>Fetch</b></span>
+  <a href="/" class="{{ 'active' if page == 'dashboard' }}">总览</a>
+  <a href="/wants" class="{{ 'active' if page == 'wants' }}">作品</a>
+  <a href="/tasks" class="{{ 'active' if page == 'tasks' }}">任务</a>
+  <a href="/failures" class="{{ 'active' if page == 'failures' }}">失败队列</a>
+  <a href="/status" class="{{ 'active' if page == 'status' }}">系统状态</a>
+  <a href="/settings" class="{{ 'active' if page == 'settings' }}">设置</a>
+</nav>
+<main class="container">
+{% block content %}{% endblock %}
+</main>
+<div id="toast-box"></div>
+<div id="token-modal" class="modal-overlay" style="display:none">
+  <form id="token-form" class="modal">
+    <h3>需要访问令牌</h3>
+    <p class="muted">请输入部署时设置的 OMNFETCH_TOKEN</p>
+    <input id="token-input" type="password" autocomplete="off" placeholder="token">
+    <div id="token-error" class="error-text"></div>
+    <button type="submit" class="btn primary">进入</button>
+  </form>
+</div>
+</body>
+</html>

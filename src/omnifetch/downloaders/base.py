@@ -21,6 +21,10 @@ class TaskResult:
     progress: float = 0.0
     error_kind: ErrorKind | None = None      # required when status == FAILED
     error_message: str | None = None
+    # Some tools replace the job handle mid-flight (aria2: the magnet/.torrent
+    # fetch completes and spawns a followedBy download). When set and
+    # different from the current handle, the core updates tasks.external_id.
+    external_id: str | None = None
 
 
 class DownloadError(Exception):
@@ -73,3 +77,7 @@ class DownloaderPlugin(ABC):
     def exists(self, resource: Resource) -> bool:
         """Optional last line of defence against duplicate submission."""
         return False
+
+    def ping(self) -> tuple[bool, str]:
+        """Liveness probe for the system status page. Returns (ok, detail)."""
+        return False, "未实现"

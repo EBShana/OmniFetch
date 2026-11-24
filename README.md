@@ -10,9 +10,17 @@ python -m venv .venv
 omnifetch init-db                                 # 初始化 SQLite（含全部唯一约束）
 omnifetch run --once                              # 跑一轮调度：抓取→入库→生成任务
 omnifetch run                                     # 持续调度
-omnifetch serve                                   # Web API，默认 :8080
+omnifetch serve                                   # Web UI + API，默认 :8080
 pytest                                            # 核心逻辑测试
 ```
+
+## Web UI
+
+`omnifetch serve` 后访问 `http://localhost:8080`：总览 / 作品（候选链展开与操作）/
+任务（状态过滤）/ 失败队列 / 系统状态。数据通过 HTMX 局部轮询刷新，无需前端构建。
+
+认证（可选）：设置环境变量 `OMNFETCH_TOKEN=你的令牌` 后，UI 会弹出令牌输入框，
+API 请求需带 `X-OmniFetch-Token` 头（或 `?token=` / `Authorization: Bearer`）。
 
 ## 配置
 

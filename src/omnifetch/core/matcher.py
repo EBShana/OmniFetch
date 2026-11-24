@@ -9,6 +9,7 @@ Two modes, both decided here in the core (crawlers stay unaware):
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 
@@ -16,16 +17,21 @@ from .db import fetch_want_by_key, want_from_row
 from .models import Want, WantStatus
 from .util import iso, utcnow
 
+log = logging.getLogger(__name__)
 
-def find_or_create_want(
+
+def create_want(
     conn: sqlite3.Connection,
     work_key: str,
     display_title: str = "",
     match_rule: dict | None = None,
     rank_rule: dict | None = None,
-) -> Want:
+) -> tuple[Want, int]:
+    """Create a want if absent. Returns (want, matched_archived) where
+    matched_archived is how many previously-ingested resources were
+    attached via backfill (0 when the want already existed)."""
     now = iso(utcnow())
-    conn.execute(
+    cur = conn.execute(
         """
         INSERT INTO wants (work_key, display_title, match_rule, rank_rule, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -37,7 +43,45 @@ def find_or_create_want(
          now, now),
     )
     conn.commit()
-    return fetch_want_by_key(conn, work_key)
+    want = fetch_want_by_key(conn, work_key)
+    matched = 0
+    if cur.rowcount == 1 and want.match_rule:
+        # The want is new: attach resources ingested BEFORE it existed
+        # (the crawl-archives-first, download-later workflow).
+        matched = backfill_want(conn, want)
+        if matched:
+            log.info("backfill: want %s matched %d archived resources", work_key, matched)
+    return want, matched
+
+
+def find_or_create_want(
+    conn: sqlite3.Connection,
+    work_key: str,
+    display_title: str = "",
+    match_rule: dict | None = None,
+    rank_rule: dict | None = None,
+) -> Want:
+    want, _ = create_want(conn, work_key, display_title, match_rule, rank_rule)
+    return want
+
+
+def backfill_want(conn: sqlite3.Connection, want: Want) -> int:
+    """Attach already-ingested, unmatched resources to this want.
+    Returns the number of resources attached."""
+    count = 0
+    stamp = iso(utcnow())
+    rows = conn.execute(
+        "SELECT id, normalized_title FROM resources WHERE want_id IS NULL"
+    ).fetchall()
+    for row in rows:
+        if _rule_matches(want.match_rule, row["normalized_title"]):
+            conn.execute(
+                "UPDATE resources SET want_id=?, updated_at=? WHERE id=?",
+                (want.id, stamp, row["id"]),
+            )
+            count += 1
+    conn.commit()
+    return count
 
 
 def list_wants(conn: sqlite3.Connection, status: WantStatus | None = None) -> list[Want]:

@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from ..core import statemachine, taskgen
-from ..core.db import fetch_task
+from ..core.db import fetch_resource, fetch_task
 from ..core.models import ErrorKind
 from ..core.util import iso
 
@@ -28,8 +28,15 @@ log = logging.getLogger(__name__)
 
 
 def dispatch(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> int:
+    # Global pacing: never exceed max_active_downloads concurrent downloads.
+    # Queued tasks wait for a free slot — this is what "add to the download
+    # list slowly" means in practice.
+    active = conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks WHERE status='DOWNLOADING'"
+    ).fetchone()["n"]
+    budget = max(0, ctx.settings.max_active_downloads - active)
     dispatched = 0
-    for _ in range(ctx.settings.max_dispatch_per_tick):
+    for _ in range(min(budget, ctx.settings.max_dispatch_per_tick)):
         task = statemachine.claim_task(conn, now)
         if task is None:
             break
@@ -42,8 +49,6 @@ def dispatch(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> int:
                 ctx.settings.retry, ctx.downloader_for, now,
             )
             continue
-
-        from ..core.db import fetch_resource
 
         resource = fetch_resource(conn, task.resource_id)
         try:
@@ -79,6 +84,9 @@ def poll_active(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> None
             log.warning("poll failed for task %s: %s", task.id, exc)
             continue
 
+        if result.external_id and result.external_id != task.external_id:
+            statemachine.retarget_task(conn, task.id, result.external_id, now)
+
         if result.status.value == "DONE":
             outcome = statemachine.complete_task(conn, task.id, now)
             if outcome == "WANT_ACQUIRED":
@@ -94,5 +102,17 @@ def poll_active(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> None
                 ctx.notify("task.failed", {"task_id": task.id})
             elif outcome == "NEW_TASK":
                 ctx.notify("want.fallback", {"failed_task_id": task.id})
+        # PROGRESS — but watch for stalls: a download that has made no
+        # progress since its claim for longer than stalled_after is treated
+        # as a transient failure (dead swarm / stuck metadata), so the
+        # backoff + fallback chain can move on.
+        claimed = task.claimed_at or now
+        if result.progress <= (task.progress or 0.0) and \
+                (now - claimed) > ctx.settings.stalled_after:
+            taskgen.on_task_failed(
+                conn, task.id, ErrorKind.TRANSIENT,
+                f"stalled: no progress for {ctx.settings.stalled_after}",
+                ctx.settings.retry, ctx.downloader_for, now,
+            )
         else:
             statemachine.update_progress(conn, task.id, result.progress, now)

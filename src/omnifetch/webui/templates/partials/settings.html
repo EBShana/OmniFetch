@@ -1,0 +1,63 @@
+{% macro inst_form(inst) %}
+<section class="panel inst">
+  <form hx-post="/ui/settings/{{ inst.kind }}/{{ inst.name }}" hx-target="closest .refresh-box">
+    <div class="inst-head">
+      <b>{{ inst.name }}</b> <span class="badge b-gray">{{ inst.type }}</span>
+      <label class="small muted"><input type="checkbox" name="enabled" {% if inst.enabled %}checked{% endif %}> 启用</label>
+      <span class="flex-spacer"></span>
+      <button class="btn mini" type="submit">保存</button>
+      <button class="btn mini danger" type="button"
+              hx-post="/ui/settings/delete/{{ inst.kind }}/{{ inst.name }}"
+              hx-target="closest .refresh-box"
+              hx-confirm="确认删除 {{ inst.name }} 的配置？">删除</button>
+    </div>
+    <input type="hidden" name="type" value="{{ inst.type }}">
+    <div class="grid-form compact">
+      {% for k, v in inst.fields.items() %}
+      <label>{{ k }}<input name="{{ k }}" value="{{ v if v is not none else '' }}"></label>
+      {% else %}
+      <p class="muted small">（没有额外参数）</p>
+      {% endfor %}
+    </div>
+  </form>
+</section>
+{% endmacro %}
+
+<section class="panel">
+  <h4>核心设置 <span class="muted small">保存即生效（无需重启，调度循环下一轮读取）</span></h4>
+  <form class="grid-form" hx-post="/ui/settings/core" hx-target="closest .refresh-box">
+    {% for k, v in core.items() %}
+    <label>{{ core_labels.get(k, k) }}
+      <input name="{{ k }}" value="{{ v }}" {% if k == 'token' %}type="password"{% endif %}>
+    </label>
+    {% endfor %}
+    <div><button class="btn primary" type="submit">保存核心设置</button></div>
+  </form>
+  <p class="muted small">数据目录：{{ core_readonly.db_path }} · 配置目录：{{ core_readonly.config_dir }}（这两项需改环境变量并重启）</p>
+</section>
+
+<section class="panel">
+  <h4>新增插件实例</h4>
+  <form class="inline-form" hx-post="/ui/settings/add" hx-target="closest .refresh-box">
+    <select name="kind">
+      <option value="source">爬取源</option>
+      <option value="downloader">下载器</option>
+    </select>
+    <select name="type">
+      <optgroup label="爬虫">
+        {% for t in crawler_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+      </optgroup>
+      <optgroup label="下载器">
+        {% for t in downloader_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+      </optgroup>
+    </select>
+    <input name="name" placeholder="实例名（字母数字-_.）" required>
+    <button class="btn" type="submit">创建</button>
+  </form>
+</section>
+
+<h4 class="section-title">爬取源（{{ sources|length }}）</h4>
+{% for inst in sources %}{{ inst_form(inst) }}{% else %}<p class="muted">还没有爬取源配置</p>{% endfor %}
+
+<h4 class="section-title">下载器（{{ downloaders|length }}）</h4>
+{% for inst in downloaders %}{{ inst_form(inst) }}{% else %}<p class="muted">还没有下载器配置</p>{% endfor %}

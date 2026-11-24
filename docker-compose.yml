@@ -29,6 +29,12 @@ services:
     profiles: ["downloaders"]
     ports:
       - "6800:6800"
+    environment:
+      RPC_SECRET: "omnifetch-test"
+      RPC_PORT: "6800"
     volumes:
       - ./downloads:/downloads
-      - ./config/aria2:/config
+      - ./aria2-config:/config
+
+volumes:
+  omnifetch-data:

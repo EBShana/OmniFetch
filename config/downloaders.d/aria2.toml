@@ -1,4 +1,5 @@
-# aria2 downloader instance (module skeleton — not implemented yet).
+# aria2 downloader via JSON-RPC. Start the bundled aria2 with:
+#   docker compose --profile downloaders up -d aria2
 name = "aria2"
 type = "aria2"
 enabled = false

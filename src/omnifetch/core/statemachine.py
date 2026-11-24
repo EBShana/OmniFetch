@@ -85,6 +85,18 @@ def begin_download(
     return cur.rowcount == 1
 
 
+def retarget_task(
+    conn: sqlite3.Connection, task_id: int, external_id: str, now: datetime
+) -> None:
+    """Update the tool-side handle when a downloader reports a new one
+    (e.g. aria2 followedBy chain after a magnet fetch)."""
+    conn.execute(
+        "UPDATE tasks SET external_id=?, updated_at=? WHERE id=? AND status='DOWNLOADING'",
+        (external_id, iso(now), task_id),
+    )
+    conn.commit()
+
+
 def update_progress(
     conn: sqlite3.Connection, task_id: int, progress: float, now: datetime
 ) -> None:
