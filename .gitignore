@@ -8,5 +8,6 @@ aria2-config/
 config-it/
 tmp/
 config/sources.d/vcb.toml
+config/downloaders.d/p115.toml
 config/omnifetch.toml
 omnifetch-repomix.txt
