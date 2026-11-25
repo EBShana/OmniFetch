@@ -10,8 +10,12 @@ from .config import load_settings
 from .core import db
 from .scheduler.runner import build_context, run_forever, run_once
 
+log = logging.getLogger(__name__)
 
-def main(argv: list[str] | None = None) -> int:
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="omnifetch")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="create/upgrade the database schema")
@@ -20,13 +24,33 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--once", action="store_true", help="run a single tick and exit")
 
     p_serve = sub.add_parser("serve", help="run the Web API and UI")
-    p_serve.add_argument("--host", default="0.0.0.0")
+    # Local by default: binding 0.0.0.0 with auth disabled exposes config
+    # editing and download control to everyone on the network.
+    p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8080)
 
     p115 = sub.add_parser("115-login", help="扫码登录 115 网盘（下载器实例需 type=p115）")
     p115.add_argument("name", help="downloaders.d 中的实例名")
+    return parser
 
-    args = parser.parse_args(argv)
+
+def is_loopback(host: str) -> bool:
+    return host.strip().lower() in _LOOPBACK_HOSTS
+
+
+def warn_if_exposed(host: str, token: str) -> bool:
+    """Warn when a non-loopback bind is reachable without authentication."""
+    if token or is_loopback(host):
+        return False
+    log.warning(
+        "serving on %s without OMNIFETCH_TOKEN: anyone who can reach this "
+        "port can edit plugin configs and control downloads", host,
+    )
+    return True
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -53,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
 
         from .app import create_app
 
+        warn_if_exposed(args.host, settings.token)
         ctx = build_context(settings)  # one context shared by UI and scheduler
         stop_event = threading.Event()
         threading.Thread(

@@ -163,6 +163,29 @@ def test_env_prefers_new_prefix_and_still_accepts_legacy(monkeypatch, tmp_path):
     assert load_settings().db_path == str(tmp_path / "old.db")
 
 
+def test_serve_binds_loopback_by_default():
+    from omnifetch.__main__ import build_parser
+
+    assert build_parser().parse_args(["serve"]).host == "127.0.0.1"
+
+
+def test_unauthenticated_non_loopback_bind_warns(caplog):
+    import logging
+
+    from omnifetch.__main__ import is_loopback, warn_if_exposed
+
+    assert is_loopback("127.0.0.1") and is_loopback("localhost") and is_loopback("::1")
+
+    with caplog.at_level(logging.WARNING):
+        assert warn_if_exposed("0.0.0.0", "") is True
+    assert "OMNIFETCH_TOKEN" in caplog.text
+
+    caplog.clear()
+    assert warn_if_exposed("127.0.0.1", "") is False
+    assert warn_if_exposed("0.0.0.0", "s3cret") is False
+    assert caplog.text == ""
+
+
 def test_add_and_delete_instance(client, env):
     app, settings = env
     response = client.post("/ui/settings/add", data={

@@ -10,7 +10,7 @@ python -m venv .venv
 omnifetch init-db                                 # 初始化 SQLite（含全部唯一约束）
 omnifetch run --once                              # 跑一轮调度：抓取→入库→生成任务
 omnifetch run                                     # 持续调度
-omnifetch serve                                   # Web UI + API，默认 :8080
+omnifetch serve                                   # Web UI + API，默认只监听 127.0.0.1:8080
 pytest                                            # 核心逻辑测试
 ```
 
@@ -21,6 +21,10 @@ pytest                                            # 核心逻辑测试
 
 认证（可选）：设置环境变量 `OMNIFETCH_TOKEN=你的令牌` 后，UI 会弹出令牌输入框，
 API 请求需带 `X-OmniFetch-Token` 头（或 `?token=` / `Authorization: Bearer`）。
+
+`serve` 默认只绑定 `127.0.0.1`。需要从局域网或容器外访问时，显式传 `--host 0.0.0.0`
+（Docker 镜像的 compose 已这样配置），并**同时设置 `OMNIFETCH_TOKEN`**；未设置令牌却
+绑定非回环地址时，启动日志会输出告警，此时同网段任何人都能修改插件配置、控制下载。
 
 ## 配置
 

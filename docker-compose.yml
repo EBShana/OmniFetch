@@ -1,6 +1,9 @@
 services:
   omnifetch:
     build: .
+    # Explicitly bind all interfaces: the container port must be reachable
+    # from the host. Use OMNIFETCH_TOKEN when exposing this beyond localhost.
+    command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
     ports:
       - "8080:8080"
     volumes:
