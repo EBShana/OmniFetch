@@ -52,7 +52,8 @@ class VcbCrawler(CrawlerPlugin):
     DEFAULT_CONFIG = {"sheet_id": "", "gid": "0", "interval": 1800,
                       "max_pages_per_run": 30, "batch_size": 20,
                       "delay": 2.0, "backend": "cookie",
-                      "mirror_retries": 2, "mirror_backoff": 2.0}
+                      "mirror_retries": 2, "mirror_backoff": 2.0,
+                      "max_consecutive_failures": 10}
 
     def fetch(self) -> list[Resource]:
         return [r for batch in self.fetch_batches() for r in batch.resources]
@@ -62,6 +63,7 @@ class VcbCrawler(CrawlerPlugin):
         max_pages = int(self.config.get("max_pages_per_run", 30))
         batch_size = max(1, int(self.config.get("batch_size", 20)))
         delay = float(self.config.get("delay", 2.0))
+        max_failures = max(1, int(self.config.get("max_consecutive_failures", 10)))
 
         rows = self._fetch_sheet(proxy)
         if max_pages > 0:
@@ -76,6 +78,7 @@ class VcbCrawler(CrawlerPlugin):
         done = 0
         attempted = 0
         succeeded = 0
+        consecutive_failures = 0
         stopped = False
 
         try:
@@ -93,7 +96,19 @@ class VcbCrawler(CrawlerPlugin):
                         html = None
                     if html is not None:
                         succeeded += 1
+                        consecutive_failures = 0
                         pending.extend(self._expand_row(row, html, proxy))
+                    else:
+                        consecutive_failures += 1
+                        # Cookie/CF/proxy failures hit every page. Crawling
+                        # all ~1100 rows would hammer the site for hours, so
+                        # trip early and let the source back off instead.
+                        if consecutive_failures >= max_failures:
+                            if pending:
+                                yield CrawlBatch(pending, done, total)
+                            raise CrawlError(
+                                f"连续 {consecutive_failures} 个 VCB 页面获取失败"
+                                f"（停在 {done + 1}/{total} 行；Cookie/Cloudflare/代理）")
                 done += 1
                 if done % batch_size == 0:
                     yield CrawlBatch(pending, done, total)

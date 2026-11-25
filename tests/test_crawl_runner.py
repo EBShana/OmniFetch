@@ -239,3 +239,46 @@ def test_successful_run_keeps_full_interval(tmp_path):
     assert not trigger._is_due(conn, "slow", 3600, now)
     assert trigger._is_due(conn, "slow", 3600, now + timedelta(seconds=3601))
     conn.close()
+
+
+def _add_failed_run(conn, source: str, started) -> None:
+    conn.execute(
+        "INSERT INTO source_runs (source, started_at, finished_at, error)"
+        " VALUES (?, ?, ?, 'CrawlError: boom')",
+        (source, iso(started), iso(started)),
+    )
+    conn.commit()
+
+
+def test_failure_backoff_doubles_up_to_one_hour(tmp_path):
+    conn = connect(str(tmp_path / "crawl.db"))
+    init_db(conn)
+    now = utcnow()
+
+    expected = [300, 600, 1200, 2400, 3600, 3600, 3600]
+    for i, delay in enumerate(expected, start=1):
+        _add_failed_run(conn, "vcb", now - timedelta(minutes=60 - i))
+        assert trigger.failure_retry_delay(conn, "vcb") == delay
+
+    # A later success resets the escalation.
+    conn.execute(
+        "INSERT INTO source_runs (source, started_at, finished_at)"
+        " VALUES ('vcb', ?, ?)",
+        (iso(now), iso(now)),
+    )
+    conn.commit()
+    assert trigger.failure_retry_delay(conn, "vcb") == 300
+    conn.close()
+
+
+def test_failed_source_waits_for_its_backoff_before_retrying(tmp_path):
+    conn = connect(str(tmp_path / "crawl.db"))
+    init_db(conn)
+    now = utcnow()
+    _add_failed_run(conn, "vcb", now - timedelta(minutes=50))
+    _add_failed_run(conn, "vcb", now - timedelta(minutes=5))
+
+    # Two consecutive failures -> 10 minutes, not the old flat 5.
+    assert not trigger._is_due(conn, "vcb", 2592000, now)
+    assert trigger._is_due(conn, "vcb", 2592000, now + timedelta(minutes=5))
+    conn.close()

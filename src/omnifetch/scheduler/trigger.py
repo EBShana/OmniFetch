@@ -26,7 +26,10 @@ log = logging.getLogger(__name__)
 
 # After a failed run, retry sooner than the source's own interval so a
 # monthly source does not stay broken for a month because of one bad tick.
+# Consecutive failures back off exponentially (5m -> 10m -> ... capped at 1h)
+# so a blocked source is not hammered by full re-crawls.
 _FAILURE_RETRY_SECONDS = 300
+_MAX_RETRY_SECONDS = 3600
 
 
 def run_due_crawlers(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> None:
@@ -115,8 +118,29 @@ def _is_due(conn: sqlite3.Connection, name: str, interval: int, now: datetime) -
     # Unfinished rows mean the process died mid-crawl (a live run is filtered
     # out by is_crawler_running before we get here), so retry soon.
     unfinished = row["finished_at"] is None
-    wait = min(interval, _FAILURE_RETRY_SECONDS) if (row["error"] or unfinished) else interval
+    if row["error"] or unfinished:
+        wait = min(interval, failure_retry_delay(conn, name))
+    else:
+        wait = interval
     return (now - last).total_seconds() >= wait
+
+
+def failure_retry_delay(conn: sqlite3.Connection, source: str) -> int:
+    """Exponential backoff for consecutive failed runs, capped at one hour."""
+    failures = 0
+    for row in conn.execute(
+        """
+        SELECT error, finished_at FROM source_runs
+        WHERE source=? ORDER BY id DESC LIMIT 50
+        """,
+        (source,),
+    ):
+        if row["error"] is None and row["finished_at"] is not None:
+            break                       # last completed run succeeded
+        failures += 1
+    if failures == 0:
+        return _FAILURE_RETRY_SECONDS
+    return min(_MAX_RETRY_SECONDS, _FAILURE_RETRY_SECONDS * 2 ** (failures - 1))
 
 
 def _start_run(conn: sqlite3.Connection, source: str, now: datetime) -> int:

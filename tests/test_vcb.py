@@ -161,6 +161,63 @@ def test_partial_page_failure_keeps_successful_rows(crawler, monkeypatch):
     assert results                       # first row still produced resources
 
 
+def test_consecutive_page_failures_trip_the_circuit_breaker(crawler, monkeypatch):
+    # A dead cookie / CF challenge fails every page. Crawling all ~1100 rows
+    # would hammer the site for hours, so abort early and let the source back
+    # off — batches already yielded must stay ingested.
+    rows = [{"uid": str(i), "title": f"T{i}", "info": "", "link":
+             f"https://vcb-s.com/archives/{i}"} for i in range(20)]
+
+    class _SequenceBackend:
+        def __init__(self):
+            self._htmls = [VCB_PAGE] + [None] * 19
+            self.calls = 0
+
+        def fetch(self, url):
+            self.calls += 1
+            return self._htmls.pop(0)
+
+        def close(self):
+            pass
+
+    backend = _SequenceBackend()
+    monkeypatch.setattr(crawler, "_fetch_sheet", lambda proxy: rows)
+    monkeypatch.setattr(crawler, "_make_backend", lambda: backend)
+    monkeypatch.setattr(vcb, "_http_get", lambda url, proxy, **kw: DMHY_PAGE)
+    crawler.config.update({"max_consecutive_failures": 3, "batch_size": 1, "delay": 0})
+
+    batches = []
+    with pytest.raises(vcb.CrawlError, match="连续 3 个"):
+        for batch in crawler.fetch_batches():
+            batches.append(batch)
+
+    assert any(b.resources for b in batches)      # first row still ingested
+    assert backend.calls == 1 + 3                 # stopped after the threshold
+
+
+def test_failure_counter_resets_after_a_successful_page(crawler, monkeypatch):
+    class _FlakyBackend:
+        def __init__(self):
+            # fail, fail, succeed, fail, fail, succeed -> never 3 in a row
+            self._htmls = [None, None, VCB_PAGE, None, None, VCB_PAGE]
+
+        def fetch(self, url):
+            return self._htmls.pop(0)
+
+        def close(self):
+            pass
+
+    rows = [{"uid": str(i), "title": f"T{i}", "info": "", "link":
+             f"https://vcb-s.com/archives/{i}"} for i in range(6)]
+    monkeypatch.setattr(crawler, "_fetch_sheet", lambda proxy: rows)
+    monkeypatch.setattr(crawler, "_make_backend", lambda: _FlakyBackend())
+    monkeypatch.setattr(vcb, "_http_get", lambda url, proxy, **kw: DMHY_PAGE)
+    crawler.config.update({"max_consecutive_failures": 3, "batch_size": 1, "delay": 0})
+
+    resources = crawler.fetch()
+    assert resources                                  # completed, no CrawlError
+
+
 def test_empty_sheet_is_not_an_error(crawler, monkeypatch):
     monkeypatch.setattr(crawler, "_fetch_sheet", lambda proxy: [])
     monkeypatch.setattr(crawler, "_make_backend", lambda: FakeBackend(None))
