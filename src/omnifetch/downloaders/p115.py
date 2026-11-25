@@ -550,26 +550,29 @@ class P115Downloader(DownloaderPlugin):
             return TaskResult(PollStatus.FAILED, error_kind=ErrorKind.PERMANENT,
                               error_message="115 离线任务不存在（可能已过期或被删除）")
         self._submitted.pop(external_id, None)
-        fail_msg = task.get("fail_msg") or ""
         actions = task.get("available_actions") or []
-        if fail_msg or "retry" in actions:
-            if "retry" in actions and external_id not in self._restarts:
+        # 失败样本未观测到：display_status 的失败枚举值待真机确认，
+        # 目前只把 retry action 作为失败信号。
+        if "retry" in actions:
+            if external_id not in self._restarts:
                 if self._request_restart(external_id, task):
                     return TaskResult(PollStatus.PROGRESS, queued=True)
-            elif "retry" in actions and self._in_restart_window(external_id):
+            elif self._in_restart_window(external_id):
                 # 刚重启过还没见效：不重复重启，也不急着判死
                 return TaskResult(PollStatus.PROGRESS, queued=True)
             # 重启失败，或重启过一轮窗口过了仍然失败：降级永久失败
             self._restarts.pop(external_id, None)
             return TaskResult(PollStatus.FAILED, error_kind=ErrorKind.PERMANENT,
-                              error_message=f"115 离线任务失败：{fail_msg or '标记为可重试'}")
-        percent = float(task.get("percent") or 0)
-        if int(task.get("status") or 0) == 1 or percent >= 100:
+                              error_message="115 离线任务失败："
+                                            f"{task.get('status_text') or '标记为可重试'}")
+        percent = float(task.get("percentDone") or 0)
+        if (str(task.get("display_status") or "") == "finished"
+                or int(task.get("status") or 0) == 2 or percent >= 100):
             self._restarts.pop(external_id, None)
             return TaskResult(PollStatus.DONE, progress=1.0)
         if percent > 0:
             self._restarts.pop(external_id, None)  # 已经重新跑起来，清掉重启记录
-        # percent 为 0 = 云端还没开始拉取（排队），这期间不计停滞
+        # percentDone 为 0 = 云端还没开始拉取（排队），这期间不计停滞
         return TaskResult(PollStatus.PROGRESS, progress=min(percent, 99.9) / 100,
                           queued=percent <= 0)
 

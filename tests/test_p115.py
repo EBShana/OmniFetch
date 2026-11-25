@@ -174,7 +174,7 @@ def test_submit_torrent_passes_savepath():
 
 def test_submit_duplicate_is_idempotent():
     api = FakeApi(tasks=[{"info_hash": "aa" * 20, "url": "",
-                          "percent": 50, "status": 0}],
+                          "percentDone": 50, "status": 1}],
                   add_error=DownloadError("115 添加离线任务: 任务已存在",
                                           ErrorKind.PERMANENT))
     dl = make(api)
@@ -193,35 +193,54 @@ def test_submit_no_uris_permanent():
 # ----------------------------------------------------------------- poll
 
 def _task(**kw):
-    base = {"info_hash": "ab" * 20, "url": "", "percent": 0, "status": 0,
-            "fail_msg": "", "available_actions": []}
+    base = {"info_hash": "ab" * 20, "url": "", "percentDone": 0, "status": 0,
+            "display_status": "", "status_text": "", "available_actions": []}
     base.update(kw)
     return base
 
 
 def test_poll_zero_percent_is_remote_queued():
-    # 115 云端排队时 percent 一直是 0：要标成 queued，避免被核心判停滞。
-    result = make(FakeApi(tasks=[_task(percent=0)])).poll("hash:" + "ab" * 20)
+    # 115 云端排队时 percentDone 一直是 0：要标成 queued，避免被核心判停滞。
+    result = make(FakeApi(tasks=[_task(percentDone=0)])).poll("hash:" + "ab" * 20)
     assert result.status == PollStatus.PROGRESS
     assert result.queued is True
 
-    result = make(FakeApi(tasks=[_task(percent=42)])).poll("hash:" + "ab" * 20)
+    result = make(FakeApi(tasks=[_task(percentDone=42)])).poll("hash:" + "ab" * 20)
     assert result.queued is False
 
 
 def test_poll_progress_done_and_failed():
-    dl = make(FakeApi(tasks=[_task(percent=42.5)]))
+    dl = make(FakeApi(tasks=[_task(percentDone=42.5)]))
     result = dl.poll("hash:" + "ab" * 20)
     assert result.status == PollStatus.PROGRESS and abs(result.progress - 0.425) < 1e-6
 
-    dl = make(FakeApi(tasks=[_task(percent=100, status=1)]))
+    dl = make(FakeApi(tasks=[_task(percentDone=100, status=2,
+                                   display_status="finished",
+                                   status_text="下载成功")]))
     assert dl.poll("hash:" + "ab" * 20).status == PollStatus.DONE
 
-    dl = make(FakeApi(tasks=[_task(fail_msg="找不到文件")]))
+    dl = make(FakeApi(tasks=[_task(status_text="找不到文件",
+                                   available_actions=["retry"])],
+                      restart_error=DownloadError("115 重启任务: 不支持",
+                                                  ErrorKind.PERMANENT)))
     result = dl.poll("hash:" + "ab" * 20)
     assert result.status == PollStatus.FAILED
     assert result.error_kind == ErrorKind.PERMANENT
     assert "找不到文件" in result.error_message
+
+
+def test_poll_real_finished_payload_is_done():
+    # 2026-11 真机返回的已完成任务形态（字段名与取值为实际观测）
+    task = {
+        "info_hash": "ab" * 20, "url": "https://x/f.zip",
+        "status": 2, "display_status": "finished", "status_text": "下载成功",
+        "percentDone": 100, "display_percent": 100,
+        "available_actions": ["view", "copy", "delete"],
+        "retry_count": 0, "retry_limit": 3,
+    }
+    result = make(FakeApi(tasks=[task])).poll("hash:" + "ab" * 20)
+    assert result.status == PollStatus.DONE
+    assert result.progress == 1.0
 
 
 def test_poll_missing_task_is_permanent_failure():
@@ -252,7 +271,7 @@ def test_poll_after_grace_period_is_permanent():
 
 
 def test_task_found_clears_submit_grace():
-    dl = make(FakeApi(tasks=[_task(percent=10)]), submit_grace_seconds=60)
+    dl = make(FakeApi(tasks=[_task(percentDone=10)]), submit_grace_seconds=60)
     key = "hash:" + "ab" * 20
     dl._submitted[key] = dl._now()
     assert dl.poll(key).status == PollStatus.PROGRESS
@@ -260,13 +279,13 @@ def test_task_found_clears_submit_grace():
 
 
 def test_poll_matches_by_url_key():
-    dl = make(FakeApi(tasks=[_task(info_hash="", url="https://x/f.zip", percent=10)]))
+    dl = make(FakeApi(tasks=[_task(info_hash="", url="https://x/f.zip", percentDone=10)]))
     result = dl.poll("url:https://x/f.zip")
     assert result.status == PollStatus.PROGRESS
 
 
 def test_poll_scans_all_pages_not_just_first():
-    api = FakeApi(pages={1: [_task(info_hash="ee" * 20)], 2: [_task(percent=30)]})
+    api = FakeApi(pages={1: [_task(info_hash="ee" * 20)], 2: [_task(percentDone=30)]})
     result = make(api).poll("hash:" + "ab" * 20)
     assert result.status == PollStatus.PROGRESS
     assert abs(result.progress - 0.3) < 1e-6
@@ -316,7 +335,7 @@ def test_submit_duplicate_found_on_later_page():
 # ----------------------------------------------------------------- retry
 
 def test_poll_retry_action_restarts_task():
-    api = FakeApi(tasks=[_task(fail_msg="下载失败", available_actions=["retry"])])
+    api = FakeApi(tasks=[_task(status_text="下载失败", available_actions=["retry"])])
     result = make(api).poll("hash:" + "ab" * 20)
     assert api.restarted == ["ab" * 20]
     assert result.status == PollStatus.PROGRESS
@@ -324,7 +343,7 @@ def test_poll_retry_action_restarts_task():
 
 
 def test_poll_restart_failure_falls_back_to_permanent():
-    api = FakeApi(tasks=[_task(fail_msg="下载失败", available_actions=["retry"])],
+    api = FakeApi(tasks=[_task(status_text="下载失败", available_actions=["retry"])],
                   restart_error=DownloadError("115 重启任务: 不支持", ErrorKind.PERMANENT))
     result = make(api).poll("hash:" + "ab" * 20)
     assert api.restarted == []
@@ -334,7 +353,7 @@ def test_poll_restart_failure_falls_back_to_permanent():
 
 def test_retry_without_info_hash_is_permanent_and_logged(caplog):
     api = FakeApi(tasks=[_task(info_hash="", url="https://x/f.zip",
-                               fail_msg="下载失败", available_actions=["retry"])])
+                               status_text="下载失败", available_actions=["retry"])])
     dl = make(api)
     with caplog.at_level(logging.WARNING, logger="omnifetch.downloaders.p115"):
         result = dl.poll("url:https://x/f.zip")
@@ -345,7 +364,7 @@ def test_retry_without_info_hash_is_permanent_and_logged(caplog):
 
 
 def test_restart_is_not_repeated_within_window():
-    api = FakeApi(tasks=[_task(fail_msg="下载失败", available_actions=["retry"])])
+    api = FakeApi(tasks=[_task(status_text="下载失败", available_actions=["retry"])])
     dl = make(api, restart_window_seconds=300)
     now = [1000.0]
     dl._now = lambda: now[0]
@@ -365,14 +384,14 @@ def test_restart_is_not_repeated_within_window():
 
 
 def test_restart_record_cleared_after_progress():
-    tasks = [_task(fail_msg="下载失败", available_actions=["retry"])]
+    tasks = [_task(status_text="下载失败", available_actions=["retry"])]
     api = FakeApi(tasks=tasks)
     dl = make(api)
     key = "hash:" + "ab" * 20
     dl.poll(key)
     assert key in dl._restarts
 
-    tasks[0].update(fail_msg="", available_actions=[], percent=12.5)
+    tasks[0].update(status_text="", available_actions=[], percentDone=12.5)
     dl._snapshot_tasks = None  # 强制重新扫描
     result = dl.poll(key)
     assert result.status == PollStatus.PROGRESS
