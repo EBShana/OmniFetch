@@ -26,6 +26,22 @@ def default_config(type_name: str) -> dict:
     return dict(getattr(cls, "DEFAULT_CONFIG", {})) if cls else {}
 
 
+def dispatch_daily_limit(type_name: str, config: dict) -> int:
+    """Per-instance daily submission cap (0 = unlimited).
+
+    115 is the only downloader with an offline quota worth pacing, so an
+    unset limit defaults to 50 there; every other type stays unlimited unless
+    explicitly configured.
+    """
+    value = config.get("dispatch_daily_limit")
+    if value is None or value == "":
+        return 50 if type_name == "p115" else 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 from .http import Aria2Downloader  # noqa: E402,F401  (register built-ins)
 from .p115 import P115Downloader  # noqa: E402,F401
 from .qbittorrent import QBittorrentDownloader  # noqa: E402,F401

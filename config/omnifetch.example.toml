@@ -5,6 +5,8 @@ reaper_stale_minutes = 10
 stalled_after_minutes = 15
 max_dispatch_per_tick = 10
 max_active_downloads = 3
+# 全局每日提交上限（0 = 不限）；p115 等下载器可在各自的卡片里单独限额
+dispatch_daily_limit = 0
 webhook_url = ""
 token = ""
 # Web UI 登录（对外网/NAS 访问建议开启；留空 ui_password_hash 则不启用登录）

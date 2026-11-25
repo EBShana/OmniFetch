@@ -20,6 +20,7 @@ from ..core import statemachine, taskgen
 from ..core.db import fetch_resource, fetch_task
 from ..core.models import ErrorKind
 from ..core.util import iso
+from ..downloaders import dispatch_daily_limit
 
 if TYPE_CHECKING:
     from .runner import Context
@@ -27,14 +28,18 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def dispatched_today(conn: sqlite3.Connection, now: datetime) -> int:
+def dispatched_today(conn: sqlite3.Connection, now: datetime,
+                     downloader: str | None = None) -> int:
     """Submissions since local midnight; the quota counts attempts, so a
     retried task consumes a new slot each time it is submitted."""
     midnight = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
     start = iso(midnight.astimezone(timezone.utc))
-    return conn.execute(
-        "SELECT COUNT(*) AS n FROM dispatch_events WHERE dispatched_at >= ?", (start,)
-    ).fetchone()["n"]
+    sql = "SELECT COUNT(*) AS n FROM dispatch_events WHERE dispatched_at >= ?"
+    params: list = [start]
+    if downloader is not None:
+        sql += " AND downloader = ?"
+        params.append(downloader)
+    return conn.execute(sql, params).fetchone()["n"]
 
 
 def dispatch(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> int:
@@ -47,12 +52,21 @@ def dispatch(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> int:
     budget = max(0, ctx.settings.max_active_downloads - active)
     per_tick = ctx.settings.max_dispatch_per_tick
     if ctx.settings.dispatch_daily_limit > 0:
-        # Daily quota: also protects the downloader account from bulk bursts.
+        # Global quota, unlimited by default; per-downloader caps below can
+        # still be stricter (p115 defaults to 50).
         remaining = ctx.settings.dispatch_daily_limit - dispatched_today(conn, now)
         per_tick = min(per_tick, max(0, remaining))
+    # Per-downloader daily caps: only downloaders with a cap are tracked, so
+    # an exhausted 115 quota never blocks aria2/qBittorrent work.
+    remaining_by_downloader: dict[str, int] = {}
+    for name, downloader in ctx.downloaders.items():
+        cap = dispatch_daily_limit(getattr(downloader, "type", ""), downloader.config)
+        if cap > 0:
+            remaining_by_downloader[name] = cap - dispatched_today(conn, now, name)
     dispatched = 0
     for _ in range(min(budget, per_tick)):
-        task = statemachine.claim_task(conn, now)
+        blocked = {name for name, left in remaining_by_downloader.items() if left <= 0}
+        task = statemachine.claim_task(conn, now, exclude_downloaders=blocked or None)
         if task is None:
             break
 
@@ -78,6 +92,8 @@ def dispatch(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> int:
             continue
 
         statemachine.begin_download(conn, task.id, external_id, now)
+        if task.downloader in remaining_by_downloader:
+            remaining_by_downloader[task.downloader] -= 1
         dispatched += 1
     return dispatched
 

@@ -600,3 +600,31 @@ def test_api_client_ignores_proxy_and_can_be_closed(monkeypatch):
     api = P115Api("missing.json")
     api.close()
     assert api._client.is_closed
+
+
+def test_parse_cookie_string_keeps_only_login_cookies():
+    jar = p115.parse_cookie_string(
+        "UID=u1; CID=c1; SEID=s1; KID=k1; other=leak\nAccepts: text/html")
+    assert jar == {"UID": "u1", "CID": "c1", "SEID": "s1", "KID": "k1"}
+    with pytest.raises(ValueError):
+        p115.parse_cookie_string("foo=bar; baz=qux")
+
+
+def test_write_cookie_file_is_owner_only(tmp_path):
+    path = tmp_path / "nested" / "cookies.json"
+    p115.write_cookie_file(path, {"UID": "u", "CID": "c"})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"UID": "u", "CID": "c"}
+    if os.name == "posix":
+        assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_downloader_daily_limit_defaults():
+    from omnifetch.downloaders import dispatch_daily_limit
+
+    assert dispatch_daily_limit("p115", {}) == 50
+    assert dispatch_daily_limit("p115", {"dispatch_daily_limit": ""}) == 50
+    assert dispatch_daily_limit("p115", {"dispatch_daily_limit": 0}) == 0
+    assert dispatch_daily_limit("aria2", {}) == 0
+    assert dispatch_daily_limit("qbittorrent", {"dispatch_daily_limit": 5}) == 5
+    assert dispatch_daily_limit("p115", {"dispatch_daily_limit": "7"}) == 7
+    assert P115Downloader.DEFAULT_CONFIG["dispatch_daily_limit"] == 50

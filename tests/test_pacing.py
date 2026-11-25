@@ -52,6 +52,13 @@ def test_backfill_does_not_steal_other_wants_resources(conn):
 
 
 class _InstantDownloader:
+    type = "test-dl"
+    config: dict = {}
+
+    def __init__(self, type_name: str = "test-dl", config: dict | None = None):
+        self.type = type_name
+        self.config = config or {}
+
     def submit(self, resource):
         return "gid-x"
 
@@ -136,12 +143,49 @@ def test_dispatch_respects_daily_limit(conn):
     assert fetch_task(conn, ids[2]).status == TaskStatus.QUEUED
 
 
-def test_default_daily_limit_is_fifty(conn):
-    ids = _queued_tasks(conn, 51)
+def test_global_daily_limit_defaults_to_unlimited(conn):
+    ids = _queued_tasks(conn, 4)
+    assert Settings().dispatch_daily_limit == 0
     ctx = _dispatch_ctx()  # Settings default
+    assert poller.dispatch(conn, ctx, utcnow()) == 4
+    assert all(fetch_task(conn, i).status == TaskStatus.DOWNLOADING for i in ids)
 
-    assert poller.dispatch(conn, ctx, utcnow()) == 50
-    assert fetch_task(conn, ids[50]).status == TaskStatus.QUEUED
+
+def _queued_for(conn, downloader: str, count: int, prefix: str) -> list[int]:
+    ids = []
+    for i in range(count):
+        res, _ = ingest.ingest_resource(
+            conn, _resource(f"https://x.example/{prefix}{i}", f"{prefix} {i} 1080p"))
+        want, _ = create_want(conn, f"{prefix} {i}")
+        conn.execute("UPDATE resources SET want_id=? WHERE id=?", (want.id, res.id))
+        conn.commit()
+        taskgen.advance_want(conn, want.id, lambda r, d=downloader: d, utcnow())
+        ids.append(conn.execute(
+            "SELECT id FROM tasks WHERE resource_id=?", (res.id,)).fetchone()["id"])
+    return ids
+
+
+def test_per_downloader_limit_does_not_block_other_downloaders(conn):
+    p115_ids = _queued_for(conn, "dl-p115", 2, "p115")
+    other_ids = _queued_for(conn, "dl-aria2", 2, "aria2")
+    settings = Settings()  # global limit now unlimited by default
+    settings.max_active_downloads = 100
+    settings.max_dispatch_per_tick = 100
+    ctx = Context(
+        settings=settings, crawlers={}, notifiers=[],
+        downloaders={
+            # p115 has a cap of 1 for today; the other downloader is unlimited.
+            "dl-p115": _InstantDownloader("p115", {"dispatch_daily_limit": 1}),
+            "dl-aria2": _InstantDownloader("aria2", {}),
+        },
+    )
+
+    assert poller.dispatch(conn, ctx, utcnow()) == 3
+    p115_status = [fetch_task(conn, i).status for i in p115_ids]
+    assert p115_status.count(TaskStatus.DOWNLOADING) == 1
+    assert p115_status.count(TaskStatus.QUEUED) == 1
+    assert all(fetch_task(conn, i).status == TaskStatus.DOWNLOADING
+               for i in other_ids)
 
 
 def test_daily_limit_resets_after_local_midnight(conn):

@@ -10,4 +10,8 @@ tmp/
 config/sources.d/vcb.toml
 config/downloaders.d/p115.toml
 config/omnifetch.toml
+# 115 Cookie 文件（含登录凭证，绝不提交）
+data/p115_cookies.json
+config/downloaders.d/*.cookie
+config/downloaders.d/*cookie*.json
 omnifetch-repomix.txt

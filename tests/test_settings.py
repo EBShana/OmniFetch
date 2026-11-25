@@ -3,6 +3,7 @@ edit / add / delete with hot reload."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tomllib
 from pathlib import Path
@@ -122,6 +123,109 @@ def test_add_instance_seeds_default_fields(client, env):
     assert 'rpc_url = "http://127.0.0.1:6800/jsonrpc"' in text
     # template fields show up in the settings form for editing
     assert "rpc_secret" in client.get("/frag/settings").text
+
+
+P115_TOML = """\
+name = "p115"
+type = "p115"
+enabled = false
+cookie_file = "{cookie_file}"
+target_dir_id = "0"
+savepath = ""
+proxy = ""
+submit_grace_seconds = 90
+snapshot_ttl = 10
+"""
+
+
+@pytest.fixture
+def p115_env(tmp_path):
+    cfg = tmp_path / "cfg"
+    (cfg / "sources.d").mkdir(parents=True)
+    (cfg / "downloaders.d").mkdir()
+    cookie = tmp_path / "p115_cookies.json"
+    (cfg / "downloaders.d" / "p115.toml").write_text(
+        P115_TOML.format(cookie_file=cookie.as_posix()), encoding="utf-8")
+    settings = Settings(db_path=str(tmp_path / "t.db"), config_dir=str(cfg))
+    return TestClient(create_app(settings)), settings, cookie
+
+
+def _p115_form(cookie_path: Path, **overrides) -> dict:
+    data = {
+        "type": "p115",
+        "enabled": "on",
+        "cookie_file": cookie_path.as_posix(),
+        "target_dir_id": "0",
+        "savepath": "",
+        "proxy": "",
+        "submit_grace_seconds": "90",
+        "snapshot_ttl": "10",
+        "dispatch_daily_limit": "50",
+    }
+    data.update(overrides)
+    return data
+
+
+def test_p115_card_shows_cookie_status_and_effective_limit(p115_env):
+    client, settings, cookie = p115_env
+    html = client.get("/frag/settings").text
+    assert "未配置" in html
+    assert "当前生效：50 次/天" in html  # p115 default cap
+    assert 'name="cookie"' in html and 'name="clear_cookie"' in html
+    assert 'name="dispatch_daily_limit"' in html
+    assert not cookie.exists()
+
+
+def test_p115_cookie_save_then_clear_never_echoes(p115_env, caplog):
+    client, settings, cookie = p115_env
+    secret = "UID=u-secret; CID=c-secret; SEID=s-secret; KID=k-secret; other=nope"
+    with caplog.at_level(logging.INFO):
+        response = client.post("/ui/settings/downloader/p115",
+                               data=_p115_form(cookie, cookie=secret,
+                                               dispatch_daily_limit="20"))
+    assert response.status_code == 200
+    toast = json.loads(response.headers["hx-trigger"])["toast"]
+    assert "Cookie 已保存" in toast
+
+    assert json.loads(cookie.read_text(encoding="utf-8")) == {
+        "UID": "u-secret", "CID": "c-secret", "SEID": "s-secret", "KID": "k-secret"}
+    toml = (Path(settings.config_dir) / "downloaders.d" / "p115.toml").read_text(encoding="utf-8")
+    assert "dispatch_daily_limit = 20" in toml     # stored as an int
+    assert "u-secret" not in toml                   # cookie never lands in git-ish config
+    assert "u-secret" not in response.text          # nor is it echoed back
+    assert "已配置" in response.text
+    assert "u-secret" not in caplog.text            # nor logged
+
+    response = client.post("/ui/settings/downloader/p115",
+                           data=_p115_form(cookie, clear_cookie="on"))
+    toast = json.loads(response.headers["hx-trigger"])["toast"]
+    assert "Cookie 已清空" in toast
+    assert not cookie.exists()
+    assert "未配置" in response.text
+    assert "已配置" not in response.text
+
+
+def test_p115_invalid_cookie_is_rejected_without_echo(p115_env):
+    client, settings, cookie = p115_env
+    response = client.post("/ui/settings/downloader/p115",
+                           data=_p115_form(cookie, cookie="foo=bar"))
+    assert response.status_code == 400
+    assert "foo=bar" not in response.text
+    assert not cookie.exists()
+
+
+def test_p115_negative_limit_is_rejected(p115_env):
+    client, settings, cookie = p115_env
+    response = client.post("/ui/settings/downloader/p115",
+                           data=_p115_form(cookie, dispatch_daily_limit="-1"))
+    assert response.status_code == 400
+    assert "非负整数" in response.text
+
+
+def test_other_downloaders_have_no_cookie_fields(client):
+    html = client.get("/frag/settings").text
+    assert 'name="cookie"' not in html
+    assert "115 Cookie" not in html
 
 
 def test_dump_toml_escapes_newlines_and_supports_lists():

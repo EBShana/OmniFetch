@@ -34,6 +34,7 @@ import binascii
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -93,6 +94,37 @@ def btih_hex(token: str) -> str:
     except (binascii.Error, ValueError):
         return token.lower()
     return raw.hex() if len(raw) == 20 else token.lower()
+
+
+_COOKIE_NAMES = ("UID", "CID", "SEID", "KID")
+
+
+def parse_cookie_string(text: str) -> dict[str, str]:
+    """Parse a pasted Cookie header ("UID=…; CID=…") into the 115 jar.
+
+    Only the four login cookies are kept: browser headers often carry
+    unrelated cookies that must not be persisted or sent to 115.
+    """
+    jar: dict[str, str] = {}
+    for part in (text or "").replace("\n", ";").split(";"):
+        name, sep, value = part.partition("=")
+        name, value = name.strip(), value.strip()
+        if sep and name in _COOKIE_NAMES and value:
+            jar[name] = value
+    if not jar:
+        raise ValueError("未找到 UID/CID/SEID/KID，请粘贴已登录 115 的 Cookie")
+    return jar
+
+
+def write_cookie_file(cookie_file: str | Path, jar: dict[str, str]) -> None:
+    """Write the cookie jar JSON and restrict it to the owner (0600)."""
+    path = Path(cookie_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(jar, indent=2), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # Windows does not always honor POSIX mode bits
+        pass
 
 
 
@@ -192,8 +224,7 @@ class P115Api:
                if name in wanted}
         if not jar:
             raise DownloadError("登录后未获得有效 Cookie", ErrorKind.PERMANENT)
-        self._cookie_file.parent.mkdir(parents=True, exist_ok=True)
-        self._cookie_file.write_text(json.dumps(jar, indent=2), encoding="utf-8")
+        write_cookie_file(self._cookie_file, jar)
 
     # -- request core
     def _request(self, method: str, url: str, **kw) -> dict:
@@ -317,7 +348,8 @@ class P115Downloader(DownloaderPlugin):
                ResourceType.NETDISK)
     DEFAULT_CONFIG = {"cookie_file": "data/p115_cookies.json",
                       "target_dir_id": "0", "savepath": "", "proxy": "",
-                      "submit_grace_seconds": 90, "snapshot_ttl": 10}
+                      "submit_grace_seconds": 90, "snapshot_ttl": 10,
+                      "dispatch_daily_limit": 50}
 
     def __init__(self, name: str, config: dict):
         super().__init__(name, config)

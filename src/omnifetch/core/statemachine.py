@@ -44,27 +44,39 @@ class FailOutcome(str, Enum):
     NOOP = "NOOP"               # task was not DOWNLOADING; nothing to do
 
 
-def claim_task(conn: sqlite3.Connection, now: datetime) -> Task | None:
+def claim_task(conn: sqlite3.Connection, now: datetime,
+               exclude_downloaders: set[str] | None = None) -> Task | None:
     """Atomically claim the oldest due task: plain QUEUED rows plus
-    FAILED_RETRYABLE rows whose backoff has expired. None if none due."""
+    FAILED_RETRYABLE rows whose backoff has expired. None if none due.
+
+    ``exclude_downloaders`` skips tasks whose downloader has hit its daily
+    submission cap, so another downloader's queued work can still proceed.
+    """
     stamp = iso(now)
-    cur = conn.execute(
-        """
+    sql = """
         UPDATE tasks
         SET status='DOWNLOADING', claimed_at=?, last_progress_at=?,
             next_retry_at=NULL, updated_at=?
         WHERE id = (
                 SELECT id FROM tasks
-                WHERE (status='QUEUED' AND (next_retry_at IS NULL OR next_retry_at <= ?))
+                WHERE ((status='QUEUED' AND (next_retry_at IS NULL OR next_retry_at <= ?))
                    OR (status='FAILED_RETRYABLE' AND next_retry_at IS NOT NULL
-                       AND next_retry_at <= ?)
+                       AND next_retry_at <= ?))
+                {exclude}
                 ORDER BY id LIMIT 1
             )
           AND status IN ('QUEUED', 'FAILED_RETRYABLE')
         RETURNING id
-        """,
-        (stamp, stamp, stamp, stamp, stamp),
-    )
+        """
+    params: list = [stamp, stamp, stamp, stamp, stamp]
+    if exclude_downloaders:
+        names = sorted(exclude_downloaders)
+        marks = ", ".join("?" for _ in names)
+        sql = sql.replace("{exclude}", f"AND downloader NOT IN ({marks})")
+        params.extend(names)
+    else:
+        sql = sql.replace("{exclude}", "")
+    cur = conn.execute(sql, params)
     row = cur.fetchone()
     conn.commit()
     if row is None:

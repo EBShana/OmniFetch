@@ -33,7 +33,7 @@ class Settings:
     stalled_after: timedelta = timedelta(minutes=15)  # no progress => transient failure
     max_dispatch_per_tick: int = 10
     max_active_downloads: int = 3         # global concurrency cap for downloads
-    dispatch_daily_limit: int = 50        # max tasks submitted per day, 0 = unlimited
+    dispatch_daily_limit: int = 0         # global cap, 0 = unlimited (per-downloader caps win)
     webhook_url: str = ""                 # set to enable webhook notifications
     token: str = ""                       # set to require auth on API/UI data
     ui_username: str = "admin"            # Web UI login user

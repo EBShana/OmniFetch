@@ -12,6 +12,7 @@ import sqlite3
 import time
 from datetime import timedelta
 from importlib.resources import files
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -34,7 +35,9 @@ from ..core.util import parse_iso, utcnow
 from ..crawlers import crawler_types
 from ..crawlers import default_config as crawler_default_config
 from ..downloaders import default_config as downloader_default_config
-from ..downloaders import downloader_types
+from ..downloaders import dispatch_daily_limit, downloader_types
+from ..downloaders.p115 import (P115Downloader, parse_cookie_string,
+                                write_cookie_file)
 from ..webapi.app import check_token, get_candidates
 from .auth import (SESSION_COOKIE, SESSION_TTL, LoginThrottle, create_session,
                    session_secret, verify_session)
@@ -67,13 +70,56 @@ _CORE_LABELS = {
     "stalled_after_minutes": "停滞判定阈值（分钟）",
     "max_dispatch_per_tick": "每轮最多分发任务数",
     "max_active_downloads": "全局并发下载上限",
-    "dispatch_daily_limit": "每日派发上限（0 = 不限）",
+    "dispatch_daily_limit": "全局每日派发上限（0 = 不限）",
     "webhook_url": "Webhook 通知地址（留空禁用）",
     "token": "访问令牌（留空不启用认证）",
     "retry_max_retries": "最大重试次数",
     "retry_base_seconds": "退避基数（秒）",
     "retry_max_seconds": "退避上限（秒）",
 }
+
+_CORE_GROUPS = [
+    ("调度", "保存即生效，调度循环下一轮读取", [
+        "poll_interval", "reaper_stale_minutes", "stalled_after_minutes",
+        "max_dispatch_per_tick", "max_active_downloads",
+    ]),
+    ("每日派发限额", "全局 0 = 不限；下载器卡片里可单独限额（p115 默认 50）", [
+        "dispatch_daily_limit",
+    ]),
+    ("重试与退避", "失败重试的指数退避参数", [
+        "retry_max_retries", "retry_base_seconds", "retry_max_seconds",
+    ]),
+    ("通知与认证", "留空即关闭对应功能", ["webhook_url", "token"]),
+]
+
+_FIELD_LABELS = {
+    "cookie_file": "Cookie 文件路径",
+    "target_dir_id": "目标目录 id（0 = 根目录）",
+    "savepath": "保存子路径",
+    "proxy": "抓种子代理（可留空）",
+    "submit_grace_seconds": "提交宽限（秒）",
+    "snapshot_ttl": "任务快照复用（秒）",
+    "interval": "抓取间隔（秒）",
+    "url": "地址",
+    "resource_type": "资源类型",
+    "max_pages_per_run": "每轮最多页数",
+}
+
+_P115_DEFAULT_COOKIE = P115Downloader.DEFAULT_CONFIG["cookie_file"]
+templates.env.globals["field_label"] = lambda k: _FIELD_LABELS.get(k, k)
+
+
+def _cookie_configured(cfg: dict) -> bool:
+    """True when the instance's cookie jar exists and has entries.
+
+    The file content is never rendered — only this boolean reaches the page.
+    """
+    path = Path(str(cfg.get("cookie_file") or _P115_DEFAULT_COOKIE))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(data)
 
 
 _CORE_INT_KEYS = {
@@ -433,18 +479,29 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
         sources_cfg, dls_cfg = load_plugin_configs(settings.config_dir)
 
         def instances(cfgs: dict, kind: str) -> list[dict]:
-            return [
-                {"kind": kind, "name": name, "type": cfg.get("type", "?"),
-                 "enabled": bool(cfg.get("enabled", True)),
-                 "fields": {k: v for k, v in cfg.items()
-                            if k not in ("name", "type", "enabled")}}
-                for name, cfg in cfgs.items()
-            ]
+            out = []
+            for name, cfg in cfgs.items():
+                ptype = cfg.get("type", "?")
+                fields = {k: v for k, v in cfg.items()
+                          if k not in ("name", "type", "enabled")}
+                item = {"kind": kind, "name": name, "type": ptype,
+                        "enabled": bool(cfg.get("enabled", True)), "fields": fields}
+                if kind == "downloader" and ptype == "p115":
+                    # Rendered in dedicated sections rather than the generic grid.
+                    fields.pop("dispatch_daily_limit", None)
+                    item["daily_limit"] = dispatch_daily_limit(ptype, cfg)
+                    item["cookie_configured"] = _cookie_configured(cfg)
+                    item["cookie_file"] = str(cfg.get("cookie_file")
+                                              or _P115_DEFAULT_COOKIE)
+                out.append(item)
+            return out
 
         return render(
             "partials/settings.html",
             core=core_settings_dict(settings),
             core_labels=_CORE_LABELS,
+            core_groups=_CORE_GROUPS,
+            core_int_keys=_CORE_INT_KEYS,
             core_readonly={"db_path": settings.db_path, "config_dir": settings.config_dir},
             sources=instances(sources_cfg, "source"),
             downloaders=instances(dls_cfg, "downloader"),
@@ -483,13 +540,50 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
             raise HTTPException(404, "unknown kind")
         form = dict(await request.form())
         ptype = str(form.pop("type", ""))
+        # Cookie input is transient: it is written to the cookie_file and never
+        # stored in the TOML, echoed back, or logged.
+        cookie_text = str(form.pop("cookie", ""))
+        clear_cookie = "clear_cookie" in form
+        form.pop("clear_cookie", None)
         sources_cfg, dls_cfg = load_plugin_configs(settings.config_dir)
         current = (sources_cfg if kind == "source" else dls_cfg).get(name, {})
         data: dict = {"name": name, "type": ptype, "enabled": "enabled" in form}
         for key, value in form.items():
             if key == "enabled":
                 continue
+            if key == "dispatch_daily_limit":
+                try:
+                    limit = int(str(value))
+                except ValueError:
+                    raise HTTPException(400, "每日派发上限必须是非负整数")
+                if limit < 0:
+                    raise HTTPException(400, "每日派发上限必须是非负整数")
+                data[key] = limit
+                continue
             data[key] = _coerce_like(str(value), current.get(key))
+        cookie_note = ""
+        if kind == "downloader" and ptype == "p115":
+            cookie_path = str(data.get("cookie_file") or current.get("cookie_file")
+                              or _P115_DEFAULT_COOKIE)
+            data["cookie_file"] = cookie_path
+            if clear_cookie:
+                try:
+                    Path(cookie_path).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise HTTPException(400, f"无法删除 Cookie 文件：{exc}")
+                cookie_note = "，Cookie 已清空"
+            elif cookie_text.strip():
+                try:
+                    jar = parse_cookie_string(cookie_text)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc))
+                try:
+                    write_cookie_file(cookie_path, jar)
+                except OSError as exc:
+                    raise HTTPException(400, f"无法写入 Cookie 文件：{exc}")
+                cookie_note = "，Cookie 已保存"
         try:
             save_plugin_config(settings.config_dir, kind, name, data)
         except ValueError as exc:
@@ -499,7 +593,7 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
                       else ctx.reload_downloader(name))
         except Exception as exc:
             status = f"已保存，但加载失败：{exc}"
-        return _toast(_settings_html(), f"{name}：{status}")
+        return _toast(_settings_html(), f"{name}：{status}{cookie_note}")
 
     @router.post("/ui/settings/add", dependencies=[Depends(auth)])
     def ui_add_plugin(kind: str = Form(...), type: str = Form(...), name: str = Form(...)):
