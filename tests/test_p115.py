@@ -26,20 +26,17 @@ DIGEST = hashlib.sha1(INFO).hexdigest()
 
 
 class FakeApi:
-    def __init__(self, tasks=None, add_error=None, pages=None, return_hash="",
-                 restart_error=None):
+    def __init__(self, tasks=None, add_error=None, pages=None, return_hash=""):
         self.tasks = tasks or []
         self.add_error = add_error
         self.pages = pages  # {page: [task, ...]}；None 表示只有一页
         self.return_hash = return_hash  # 模拟 115 添加任务响应里的 info_hash
-        self.restart_error = restart_error
         self.calls = 0
         self.cookie_expired = False
         self.added_urls: list[str] = []
         self.added_bts: list[str] = []
         self.added_bt_savepaths: list[str] = []
         self.deleted: list[str] = []
-        self.restarted: list[str] = []
 
     def _added(self) -> dict:
         return {"state": True, "info_hash": self.return_hash} if self.return_hash \
@@ -72,12 +69,6 @@ class FakeApi:
 
     def task_del(self, info_hash):
         self.deleted.append(info_hash)
-
-    def restart_task(self, info_hash):
-        if self.restart_error:
-            raise self.restart_error
-        self.restarted.append(info_hash)
-        return {"state": True}
 
 
 def make(api: FakeApi, **cfg) -> P115Downloader:
@@ -219,10 +210,8 @@ def test_poll_progress_done_and_failed():
                                    status_text="下载成功")]))
     assert dl.poll("hash:" + "ab" * 20).status == PollStatus.DONE
 
-    dl = make(FakeApi(tasks=[_task(status_text="找不到文件",
-                                   available_actions=["retry"])],
-                      restart_error=DownloadError("115 重启任务: 不支持",
-                                                  ErrorKind.PERMANENT)))
+    dl = make(FakeApi(tasks=[_task(status_text="下载失败：找不到文件",
+                                   retry_count=3, retry_limit=3)]))
     result = dl.poll("hash:" + "ab" * 20)
     assert result.status == PollStatus.FAILED
     assert result.error_kind == ErrorKind.PERMANENT
@@ -256,8 +245,8 @@ def test_poll_real_waiting_payload_is_queued():
     assert result.queued is True
 
 
-def test_poll_real_failed_payload_is_permanent():
-    # 真机失败态：status=-1、display_status=failed，且没有 retry action
+def test_poll_real_failed_payload_is_retryable():
+    # 真机失败态：status=-1、display_status=failed、retry_count=0 < retry_limit=3
     task = {
         "info_hash": "ab" * 20, "url": "https://x/dead.bin",
         "status": -1, "display_status": "failed", "status_text": "下载失败",
@@ -265,12 +254,41 @@ def test_poll_real_failed_payload_is_permanent():
         "available_actions": ["copy", "delete"],
         "retry_count": 0, "retry_limit": 3,
     }
-    dl = make(FakeApi(tasks=[task]))
-    result = dl.poll("hash:" + "ab" * 20)
+    api = FakeApi(tasks=[task])
+    result = make(api).poll("hash:" + "ab" * 20)
+    assert result.status == PollStatus.FAILED
+    assert result.error_kind == ErrorKind.TRANSIENT
+    assert "下载失败" in result.error_message
+    # 重试前先清掉云端失败任务
+    assert api.deleted == ["ab" * 20]
+
+
+def test_poll_real_failed_payload_at_limit_is_permanent():
+    task = {
+        "info_hash": "ab" * 20, "url": "https://x/dead.bin",
+        "status": -1, "display_status": "failed", "status_text": "下载失败",
+        "percentDone": 0, "available_actions": ["copy", "delete"],
+        "retry_count": 3, "retry_limit": 3,
+    }
+    api = FakeApi(tasks=[task])
+    result = make(api).poll("hash:" + "ab" * 20)
     assert result.status == PollStatus.FAILED
     assert result.error_kind == ErrorKind.PERMANENT
-    assert "下载失败" in result.error_message
-    assert dl._restarts == {}
+    assert api.deleted == []
+
+
+def test_poll_failed_without_hash_logs_and_still_retries(caplog):
+    task = _task(info_hash="", url="https://x/f.zip", status=-1,
+                 display_status="failed", status_text="下载失败",
+                 retry_count=0, retry_limit=3)
+    api = FakeApi(tasks=[task])
+    dl = make(api)
+    with caplog.at_level(logging.WARNING, logger="omnifetch.downloaders.p115"):
+        result = dl.poll("url:https://x/f.zip")
+    assert result.status == PollStatus.FAILED
+    assert result.error_kind == ErrorKind.TRANSIENT
+    assert api.deleted == []
+    assert any("info_hash" in record.getMessage() for record in caplog.records)
 
 
 def test_poll_missing_task_is_permanent_failure():
@@ -362,98 +380,7 @@ def test_submit_duplicate_found_on_later_page():
     assert key == "hash:" + "aa" * 20
 
 
-# ----------------------------------------------------------------- retry
-
-def test_poll_retry_action_restarts_task():
-    api = FakeApi(tasks=[_task(status_text="下载失败", available_actions=["retry"])])
-    result = make(api).poll("hash:" + "ab" * 20)
-    assert api.restarted == ["ab" * 20]
-    assert result.status == PollStatus.PROGRESS
-    assert result.queued is True
-
-
-def test_poll_restart_failure_falls_back_to_permanent():
-    api = FakeApi(tasks=[_task(status_text="下载失败", available_actions=["retry"])],
-                  restart_error=DownloadError("115 重启任务: 不支持", ErrorKind.PERMANENT))
-    result = make(api).poll("hash:" + "ab" * 20)
-    assert api.restarted == []
-    assert result.status == PollStatus.FAILED
-    assert result.error_kind == ErrorKind.PERMANENT
-
-
-def test_retry_without_info_hash_is_permanent_and_logged(caplog):
-    api = FakeApi(tasks=[_task(info_hash="", url="https://x/f.zip",
-                               status_text="下载失败", available_actions=["retry"])])
-    dl = make(api)
-    with caplog.at_level(logging.WARNING, logger="omnifetch.downloaders.p115"):
-        result = dl.poll("url:https://x/f.zip")
-    assert api.restarted == []
-    assert result.status == PollStatus.FAILED
-    assert result.error_kind == ErrorKind.PERMANENT
-    assert any("info_hash" in record.getMessage() for record in caplog.records)
-
-
-def test_restart_is_not_repeated_within_window():
-    api = FakeApi(tasks=[_task(status_text="下载失败", available_actions=["retry"])])
-    dl = make(api, restart_window_seconds=300)
-    now = [1000.0]
-    dl._now = lambda: now[0]
-    key = "hash:" + "ab" * 20
-
-    assert dl.poll(key).status == PollStatus.PROGRESS
-    assert len(api.restarted) == 1
-
-    now[0] += 30  # 观察窗口内：不重复重启，也不判死
-    assert dl.poll(key).status == PollStatus.PROGRESS
-    assert len(api.restarted) == 1
-
-    now[0] += 301  # 窗口过去还是失败：降级永久失败
-    result = dl.poll(key)
-    assert result.status == PollStatus.FAILED
-    assert result.error_kind == ErrorKind.PERMANENT
-
-
-def test_restart_record_cleared_after_progress():
-    tasks = [_task(status_text="下载失败", available_actions=["retry"])]
-    api = FakeApi(tasks=tasks)
-    dl = make(api)
-    key = "hash:" + "ab" * 20
-    dl.poll(key)
-    assert key in dl._restarts
-
-    tasks[0].update(status_text="", available_actions=[], percentDone=12.5)
-    dl._snapshot_tasks = None  # 强制重新扫描
-    result = dl.poll(key)
-    assert result.status == PollStatus.PROGRESS
-    assert result.queued is False
-    assert key not in dl._restarts
-
-
-def test_restart_task_posts_hash_with_signature():
-    api = P115Api("missing.json")
-    calls: dict = {}
-
-    class _Response:
-        status_code = 200
-
-        def json(self):
-            return {"state": True}
-
-    class _Client:
-        def request(self, method, url, **kw):
-            calls.update(method=method, url=url, **kw)
-            return _Response()
-
-    api._client.close()
-    api._client = _Client()
-    api._sign = ("sig", "1700000000")
-    api._sign_at = time.time()
-
-    assert api.restart_task("ab" * 20) == {"state": True}
-    assert calls["method"] == "POST"
-    assert calls["params"] == {"ac": "restart"}
-    assert calls["data"] == {"info_hash": "ab" * 20, "sign": "sig",
-                             "time": "1700000000"}
+# ------------------------------------------------------------- request API
 
 
 def test_task_del_posts_hash0_with_signature():
@@ -512,27 +439,16 @@ def test_add_tasks_post_to_web_endpoint():
     assert "params" not in calls[0] and "params" not in calls[1]
 
 
-def test_restart_task_maps_115_error():
+def test_check_reads_error_msg():
     api = P115Api("missing.json")
-
-    class _Response:
-        status_code = 200
-
-        def json(self):
-            return {"state": False, "error_msg": "用户任务不存在", "errcode": 10021}
-
-    class _Client:
-        def request(self, method, url, **kw):
-            return _Response()
-
-    api._client.close()
-    api._client = _Client()
-    api._sign = ("sig", "t")
-    api._sign_at = time.time()
-
-    with pytest.raises(DownloadError) as exc_info:
-        api.restart_task("ab" * 20)
+    try:
+        with pytest.raises(DownloadError) as exc_info:
+            api._check({"state": False, "error_msg": "用户任务不存在",
+                        "errcode": 10021}, "删除任务")
+    finally:
+        api._client.close()
     assert exc_info.value.kind == ErrorKind.PERMANENT
+    assert "用户任务不存在" in str(exc_info.value)
 
 
 # ---------------------------------------------------------- exists/cancel
