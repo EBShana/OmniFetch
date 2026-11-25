@@ -117,6 +117,73 @@ def test_poller_does_not_stall_healthy_task(tmp_path):
     assert fetch_task(conn, task.id).status == TaskStatus.DOWNLOADING
 
 
+class _QueuedDownloader:
+    """远端已受理但还没开始（排队/暂停），进度恒为 0。"""
+
+    def __init__(self, progress=0.0):
+        self.progress = progress
+        self.cancelled: list[str] = []
+
+    def poll(self, external_id):
+        return TaskResult(PollStatus.PROGRESS, progress=self.progress, queued=True)
+
+    def cancel(self, external_id):
+        self.cancelled.append(external_id)
+
+
+def test_poller_does_not_stall_remote_queued_task(tmp_path):
+    conn = _conn(tmp_path)
+    _, want_id = _want_with_resource(conn)
+    now = utcnow()
+    taskgen.advance_want(conn, want_id, DL, now)
+    task = statemachine.claim_task(conn, now)
+    statemachine.begin_download(conn, task.id, "gid-x", now)
+
+    # 已经等了 20 分钟，但远端仍在排队：不该被当成停滞。
+    old = iso(now - timedelta(minutes=20))
+    conn.execute("UPDATE tasks SET claimed_at=?, last_progress_at=?, updated_at=? "
+                 "WHERE id=?", (old, old, old, task.id))
+    conn.commit()
+
+    settings = Settings()
+    settings.stalled_after = timedelta(minutes=15)
+    downloader = _QueuedDownloader()
+    ctx = Context(settings=settings, crawlers={}, downloaders={"test-dl": downloader},
+                  notifiers=[])
+    poller.poll_active(conn, ctx, utcnow())
+
+    after = fetch_task(conn, task.id)
+    assert after.status == TaskStatus.DOWNLOADING
+    assert downloader.cancelled == []
+    row = conn.execute("SELECT updated_at FROM tasks WHERE id=?", (task.id,)).fetchone()
+    assert row["updated_at"] > iso(now - timedelta(minutes=1))
+
+
+def test_poller_records_progress_of_queued_task_that_moves(tmp_path):
+    conn = _conn(tmp_path)
+    _, want_id = _want_with_resource(conn)
+    now = utcnow()
+    taskgen.advance_want(conn, want_id, DL, now)
+    task = statemachine.claim_task(conn, now)
+    statemachine.begin_download(conn, task.id, "gid-x", now)
+
+    old = iso(now - timedelta(minutes=30))
+    conn.execute("UPDATE tasks SET claimed_at=? WHERE id=?", (old, task.id))
+    conn.commit()
+
+    settings = Settings()
+    settings.stalled_after = timedelta(minutes=15)
+    ctx = Context(settings=settings, crawlers={},
+                  downloaders={"test-dl": _QueuedDownloader(progress=0.4)},
+                  notifiers=[])
+    poller.poll_active(conn, ctx, utcnow())
+
+    after = fetch_task(conn, task.id)
+    assert after.status == TaskStatus.DOWNLOADING
+    assert abs(after.progress - 0.4) < 1e-9
+    assert after.last_progress_at is not None
+
+
 def test_score_prefer_sources():
     dmhy = Resource(title="T", source_url="u1", source="vcb-dmhy",
                     download_uris=["u"], resource_type=ResourceType.HTTP)

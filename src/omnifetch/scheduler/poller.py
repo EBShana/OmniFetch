@@ -115,6 +115,11 @@ def poll_active(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> None
             statemachine.update_progress(conn, task.id, result.progress, now)
             continue
 
+        if result.queued:
+            # 远端排队 / 未开始（aria2 waiting/paused、115 云端排队）：
+            # 心跳上面已经刷过，停滞计时不能推进，否则重试只会撞上同一个队列。
+            continue
+
         baseline = task.last_progress_at or task.claimed_at or now
         if (now - baseline) > ctx.settings.stalled_after:
             stalled_id = result.external_id or task.external_id

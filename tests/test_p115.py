@@ -166,6 +166,16 @@ def _task(**kw):
     return base
 
 
+def test_poll_zero_percent_is_remote_queued():
+    # 115 云端排队时 percent 一直是 0：要标成 queued，避免被核心判停滞。
+    result = make(FakeApi(tasks=[_task(percent=0)])).poll("hash:" + "ab" * 20)
+    assert result.status == PollStatus.PROGRESS
+    assert result.queued is True
+
+    result = make(FakeApi(tasks=[_task(percent=42)])).poll("hash:" + "ab" * 20)
+    assert result.queued is False
+
+
 def test_poll_progress_done_and_failed():
     dl = make(FakeApi(tasks=[_task(percent=42.5)]))
     result = dl.poll("hash:" + "ab" * 20)
@@ -192,7 +202,9 @@ def test_poll_just_after_submit_uses_grace_period():
     # 115 列表入库有延迟：刚提交的任务在宽限期内不能判永久失败。
     dl = make(FakeApi(tasks=[]), submit_grace_seconds=60)
     key = dl.submit(resource("magnet:?xt=urn:btih:" + "AA" * 20, ResourceType.MAGNET))
-    assert dl.poll(key).status == PollStatus.PROGRESS
+    result = dl.poll(key)
+    assert result.status == PollStatus.PROGRESS
+    assert result.queued is True
 
 
 def test_poll_after_grace_period_is_permanent():
@@ -231,7 +243,9 @@ def test_incomplete_scan_is_not_permanent_failure():
     pages = {page: [_task(info_hash="ee" * 20)] for page in range(1, 6)}
     dl = make(FakeApi(pages=pages))
     dl._max_scan_pages = 2
-    assert dl.poll("hash:" + "ab" * 20).status == PollStatus.PROGRESS
+    result = dl.poll("hash:" + "ab" * 20)
+    assert result.status == PollStatus.PROGRESS
+    assert result.queued is True
 
 
 def test_task_list_snapshot_is_reused_within_ttl():

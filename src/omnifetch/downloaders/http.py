@@ -165,6 +165,8 @@ class Aria2Downloader(DownloaderPlugin):
             PollStatus.PROGRESS,
             progress=(done / total) if total else 0.0,
             external_id=gid,
+            # 排队（waiting）或人工暂停（paused）时远端还没在传：不能算停滞
+            queued=state in ("waiting", "paused"),
         )
 
     # -------------------------------------------------------------- cancel

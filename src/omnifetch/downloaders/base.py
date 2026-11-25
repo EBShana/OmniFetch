@@ -25,6 +25,11 @@ class TaskResult:
     # fetch completes and spawns a followedBy download). When set and
     # different from the current handle, the core updates tasks.external_id.
     external_id: str | None = None
+    # True when the remote tool has accepted the job but it has not started
+    # transferring yet (aria2 waiting/paused, 115 cloud-side queue). The core
+    # only refreshes the heartbeat and must not run the stall clock: the wait
+    # is on the remote side and retrying would just hit the same queue.
+    queued: bool = False
 
 
 class DownloadError(Exception):

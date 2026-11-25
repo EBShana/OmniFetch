@@ -69,6 +69,19 @@ def test_poll_active_reports_progress_ratio():
     assert result.progress == 0.5
 
 
+def test_poll_waiting_and_paused_are_remote_queued():
+    for state in ("waiting", "paused"):
+        dl = make(responses=[{"status": state, "completedLength": "0",
+                              "totalLength": "0", "followedBy": []}])
+        result = dl.poll("gid-1")
+        assert result.status == PollStatus.PROGRESS
+        assert result.queued is True
+
+    dl = make(responses=[{"status": "active", "completedLength": "1",
+                          "totalLength": "10", "followedBy": []}])
+    assert dl.poll("gid-1").queued is False
+
+
 def test_poll_complete_is_done():
     dl = make(responses=[{"status": "complete", "completedLength": "1024",
                           "totalLength": "1024", "followedBy": []}])

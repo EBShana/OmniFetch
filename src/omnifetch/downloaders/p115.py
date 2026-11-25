@@ -481,10 +481,10 @@ class P115Downloader(DownloaderPlugin):
             if not complete:
                 # 列表没扫全时“找不到”不可信，宁可等下一轮也不要误杀任务
                 log.warning("115 任务列表未扫全，暂不判定任务 %s 失败", external_id)
-                return TaskResult(PollStatus.PROGRESS)
+                return TaskResult(PollStatus.PROGRESS, queued=True)
             if self._in_submit_grace(external_id):
                 # 刚提交的任务可能还没出现在 115 的任务列表里
-                return TaskResult(PollStatus.PROGRESS)
+                return TaskResult(PollStatus.PROGRESS, queued=True)
             return TaskResult(PollStatus.FAILED, error_kind=ErrorKind.PERMANENT,
                               error_message="115 离线任务不存在（可能已过期或被删除）")
         self._submitted.pop(external_id, None)
@@ -496,7 +496,9 @@ class P115Downloader(DownloaderPlugin):
         percent = float(task.get("percent") or 0)
         if int(task.get("status") or 0) == 1 or percent >= 100:
             return TaskResult(PollStatus.DONE, progress=1.0)
-        return TaskResult(PollStatus.PROGRESS, progress=min(percent, 99.9) / 100)
+        # percent 为 0 = 云端还没开始拉取（排队），这期间不计停滞
+        return TaskResult(PollStatus.PROGRESS, progress=min(percent, 99.9) / 100,
+                          queued=percent <= 0)
 
     def exists(self, resource: Resource) -> bool:
         uri = next((u for u in resource.download_uris if u), "")
