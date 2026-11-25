@@ -62,6 +62,7 @@ _CORE_LABELS = {
     "stalled_after_minutes": "停滞判定阈值（分钟）",
     "max_dispatch_per_tick": "每轮最多分发任务数",
     "max_active_downloads": "全局并发下载上限",
+    "dispatch_daily_limit": "每日派发上限（0 = 不限）",
     "webhook_url": "Webhook 通知地址（留空禁用）",
     "token": "访问令牌（留空不启用认证）",
     "retry_max_retries": "最大重试次数",
@@ -72,7 +73,7 @@ _CORE_LABELS = {
 
 _CORE_INT_KEYS = {
     "poll_interval", "reaper_stale_minutes", "stalled_after_minutes",
-    "max_dispatch_per_tick", "max_active_downloads",
+    "max_dispatch_per_tick", "max_active_downloads", "dispatch_daily_limit",
     "retry_max_retries", "retry_base_seconds", "retry_max_seconds",
 }
 

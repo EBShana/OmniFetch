@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_count INTEGER NOT NULL DEFAULT 0,
     next_retry_at TEXT,
     claimed_at TEXT,
+    dispatched_at TEXT,
     last_progress_at TEXT,
     external_id TEXT,
     progress REAL NOT NULL DEFAULT 0,
@@ -115,6 +116,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
     if "last_progress_at" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN last_progress_at TEXT")
+    # ...and before the daily dispatch budget.
+    if "dispatched_at" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN dispatched_at TEXT")
     # ...and before incremental crawl progress.
     run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(source_runs)")}
     for column, ddl in (

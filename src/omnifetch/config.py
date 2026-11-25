@@ -32,6 +32,7 @@ class Settings:
     stalled_after: timedelta = timedelta(minutes=15)  # no progress => transient failure
     max_dispatch_per_tick: int = 10
     max_active_downloads: int = 3         # global concurrency cap for downloads
+    dispatch_daily_limit: int = 50        # max tasks submitted per day, 0 = unlimited
     webhook_url: str = ""                 # set to enable webhook notifications
     token: str = ""                       # set to require auth on API/UI data
     retry: RetryPolicy = field(default_factory=RetryPolicy)
@@ -49,6 +50,8 @@ def _apply_core_dict(settings: Settings, data: dict) -> None:
         settings.max_dispatch_per_tick = int(data["max_dispatch_per_tick"])
     if "max_active_downloads" in data:
         settings.max_active_downloads = int(data["max_active_downloads"])
+    if "dispatch_daily_limit" in data:
+        settings.dispatch_daily_limit = int(data["dispatch_daily_limit"])
     if "webhook_url" in data:
         settings.webhook_url = str(data["webhook_url"])
     if "token" in data:
@@ -69,6 +72,7 @@ def core_settings_dict(settings: Settings) -> dict:
         "stalled_after_minutes": int(settings.stalled_after.total_seconds() // 60),
         "max_dispatch_per_tick": settings.max_dispatch_per_tick,
         "max_active_downloads": settings.max_active_downloads,
+        "dispatch_daily_limit": settings.dispatch_daily_limit,
         "webhook_url": settings.webhook_url,
         "token": settings.token,
         "retry_max_retries": settings.retry.max_retries,
@@ -157,6 +161,8 @@ def load_settings() -> Settings:
         settings.stalled_after = timedelta(minutes=int(env("STALLED_AFTER_MINUTES")))
     if env("MAX_ACTIVE_DOWNLOADS"):
         settings.max_active_downloads = int(env("MAX_ACTIVE_DOWNLOADS"))
+    if env("DISPATCH_DAILY_LIMIT"):
+        settings.dispatch_daily_limit = int(env("DISPATCH_DAILY_LIMIT"))
     if env("WEBHOOK"):
         settings.webhook_url = env("WEBHOOK")
     if env("TOKEN"):

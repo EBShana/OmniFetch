@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import timedelta
+
 from omnifetch.config import Settings
 from omnifetch.core import ingest, statemachine, taskgen
 from omnifetch.core.db import connect, fetch_task, init_db
 from omnifetch.core.matcher import create_want
 from omnifetch.core.models import Resource, ResourceType, TaskStatus
-from omnifetch.core.util import utcnow
+from omnifetch.core.util import iso, utcnow
 from omnifetch.scheduler import poller
 from omnifetch.scheduler.runner import Context
 
@@ -94,3 +96,76 @@ def test_dispatch_cap_two(conn):
     poller.dispatch(conn, ctx, utcnow())
     assert fetch_task(conn, t1).status == TaskStatus.DOWNLOADING
     assert fetch_task(conn, t2).status == TaskStatus.DOWNLOADING
+
+
+def _queued_tasks(conn, count: int) -> list[int]:
+    task_ids = []
+    for i in range(count):
+        res, _ = ingest.ingest_resource(
+            conn, _resource(f"https://x.example/q{i}", f"Queued {i} 1080p"))
+        want, _ = create_want(conn, f"queued {i}")
+        conn.execute("UPDATE resources SET want_id=? WHERE id=?", (want.id, res.id))
+        conn.commit()
+        taskgen.advance_want(conn, want.id, DL, utcnow())
+        task_ids.append(conn.execute(
+            "SELECT id FROM tasks WHERE resource_id=?", (res.id,)).fetchone()["id"])
+    return task_ids
+
+
+def _dispatch_ctx(**overrides) -> Context:
+    settings = Settings()
+    settings.max_active_downloads = 100   # keep concurrency out of the way
+    settings.max_dispatch_per_tick = 100
+    for key, value in overrides.items():
+        setattr(settings, key, value)
+    return Context(settings=settings, crawlers={},
+                   downloaders={"test-dl": _InstantDownloader()}, notifiers=[])
+
+
+def test_dispatch_respects_daily_limit(conn):
+    ids = _queued_tasks(conn, 5)
+    ctx = _dispatch_ctx(dispatch_daily_limit=2)
+    now = utcnow()
+
+    assert poller.dispatch(conn, ctx, now) == 2
+    assert fetch_task(conn, ids[0]).status == TaskStatus.DOWNLOADING
+    assert fetch_task(conn, ids[1]).status == TaskStatus.DOWNLOADING
+
+    # Quota exhausted: nothing else leaves the queue today.
+    assert poller.dispatch(conn, ctx, now) == 0
+    assert fetch_task(conn, ids[2]).status == TaskStatus.QUEUED
+
+
+def test_default_daily_limit_is_fifty(conn):
+    ids = _queued_tasks(conn, 51)
+    ctx = _dispatch_ctx()  # Settings default
+
+    assert poller.dispatch(conn, ctx, utcnow()) == 50
+    assert fetch_task(conn, ids[50]).status == TaskStatus.QUEUED
+
+
+def test_daily_limit_resets_after_local_midnight(conn):
+    ids = _queued_tasks(conn, 4)
+    ctx = _dispatch_ctx(dispatch_daily_limit=2)
+    now = utcnow()
+    assert poller.dispatch(conn, ctx, now) == 2
+
+    # Those two were submitted "yesterday": they no longer consume today's quota.
+    yesterday = iso(now - timedelta(days=1))
+    conn.execute("UPDATE tasks SET dispatched_at=? WHERE id IN (?, ?)",
+                 (yesterday, ids[0], ids[1]))
+    conn.commit()
+    statemachine.complete_task(conn, ids[0], now)
+    statemachine.complete_task(conn, ids[1], now)
+
+    assert poller.dispatch(conn, ctx, now) == 2
+    assert fetch_task(conn, ids[2]).status == TaskStatus.DOWNLOADING
+    assert fetch_task(conn, ids[3]).status == TaskStatus.DOWNLOADING
+
+
+def test_zero_daily_limit_means_unlimited(conn):
+    ids = _queued_tasks(conn, 3)
+    ctx = _dispatch_ctx(dispatch_daily_limit=0)
+
+    assert poller.dispatch(conn, ctx, utcnow()) == 3
+    assert all(fetch_task(conn, i).status == TaskStatus.DOWNLOADING for i in ids)

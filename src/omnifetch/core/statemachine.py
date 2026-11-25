@@ -78,10 +78,10 @@ def begin_download(
     """Record the downloader-side handle after a successful submit."""
     cur = conn.execute(
         """
-        UPDATE tasks SET external_id=?, updated_at=?
+        UPDATE tasks SET external_id=?, dispatched_at=?, updated_at=?
         WHERE id=? AND status='DOWNLOADING'
         """,
-        (external_id, iso(now), task_id),
+        (external_id, iso(now), iso(now), task_id),
     )
     conn.commit()
     return cur.rowcount == 1

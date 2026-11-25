@@ -58,6 +58,7 @@ def test_core_settings_save_persists_and_applies(client, env):
         "stalled_after_minutes": "30",
         "max_dispatch_per_tick": "5",
         "max_active_downloads": "2",
+        "dispatch_daily_limit": "20",
         "webhook_url": "",
         "token": "",
         "retry_max_retries": "3",
@@ -68,10 +69,12 @@ def test_core_settings_save_persists_and_applies(client, env):
     text = (Path(settings.config_dir) / CORE_TOML).read_text(encoding="utf-8")
     assert "poll_interval = 60" in text
     assert "max_active_downloads = 2" in text
+    assert "dispatch_daily_limit = 20" in text
     # live-applied to the running context
     ctx = app.state.ctx
     assert ctx.settings.poll_interval == 60
     assert ctx.settings.max_active_downloads == 2
+    assert ctx.settings.dispatch_daily_limit == 20
     assert ctx.settings.retry.max_retries == 3
     assert ctx.settings.stalled_after.total_seconds() == 1800
 
@@ -143,9 +146,11 @@ def test_env_prefers_new_prefix_and_still_accepts_legacy(monkeypatch, tmp_path):
 
     monkeypatch.setenv("OMNIFETCH_CONFIG", str(cfg))
     monkeypatch.setenv("OMNIFETCH_DB", str(tmp_path / "new.db"))
+    monkeypatch.setenv("OMNIFETCH_DISPATCH_DAILY_LIMIT", "7")
     monkeypatch.setenv("OMNFETCH_TOKEN", "legacy-token")
     settings = load_settings()
     assert settings.db_path == str(tmp_path / "new.db")
+    assert settings.dispatch_daily_limit == 7
     assert settings.token == "legacy-token"
 
     # New prefix wins when both are present.

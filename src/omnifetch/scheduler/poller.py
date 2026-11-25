@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..core import statemachine, taskgen
@@ -27,6 +27,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def dispatched_today(conn: sqlite3.Connection, now: datetime) -> int:
+    """Tasks submitted since local midnight (the quota resets at 00:00 local)."""
+    midnight = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    start = iso(midnight.astimezone(timezone.utc))
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks WHERE dispatched_at >= ?", (start,)
+    ).fetchone()["n"]
+
+
 def dispatch(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> int:
     # Global pacing: never exceed max_active_downloads concurrent downloads.
     # Queued tasks wait for a free slot — this is what "add to the download
@@ -35,8 +44,13 @@ def dispatch(conn: sqlite3.Connection, ctx: "Context", now: datetime) -> int:
         "SELECT COUNT(*) AS n FROM tasks WHERE status='DOWNLOADING'"
     ).fetchone()["n"]
     budget = max(0, ctx.settings.max_active_downloads - active)
+    per_tick = ctx.settings.max_dispatch_per_tick
+    if ctx.settings.dispatch_daily_limit > 0:
+        # Daily quota: also protects the downloader account from bulk bursts.
+        remaining = ctx.settings.dispatch_daily_limit - dispatched_today(conn, now)
+        per_tick = min(per_tick, max(0, remaining))
     dispatched = 0
-    for _ in range(min(budget, ctx.settings.max_dispatch_per_tick)):
+    for _ in range(min(budget, per_tick)):
         task = statemachine.claim_task(conn, now)
         if task is None:
             break
