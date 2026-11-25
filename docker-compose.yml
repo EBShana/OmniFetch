@@ -1,8 +1,8 @@
 services:
   omnifetch:
     build: .
-    # Explicitly bind all interfaces: the container port must be reachable
-    # from the host. Use OMNIFETCH_TOKEN when exposing this beyond localhost.
+    # serve 默认已绑定 0.0.0.0（局域网可访问），这里显式写出；
+    # 未配置 OMNIFETCH_TOKEN 或 Web UI 登录密码时，启动日志会给出告警。
     command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
     ports:
       - "8080:8080"

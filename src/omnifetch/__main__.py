@@ -24,9 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--once", action="store_true", help="run a single tick and exit")
 
     p_serve = sub.add_parser("serve", help="run the Web API and UI")
-    # Local by default: binding 0.0.0.0 with auth disabled exposes config
-    # editing and download control to everyone on the network.
-    p_serve.add_argument("--host", default="127.0.0.1")
+    # LAN by default. Startup warns (does not refuse) when neither the API
+    # token nor a UI login password is configured.
+    p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=8080)
 
     p115 = sub.add_parser("115-login", help="扫码登录 115 网盘（下载器实例需 type=p115）")
@@ -43,13 +43,14 @@ def is_loopback(host: str) -> bool:
     return host.strip().lower() in _LOOPBACK_HOSTS
 
 
-def warn_if_exposed(host: str, token: str) -> bool:
-    """Warn when a non-loopback bind is reachable without authentication."""
-    if token or is_loopback(host):
+def warn_if_exposed(host: str, token: str, ui_password_hash: str = "") -> bool:
+    """Warn when a non-loopback bind has neither API token nor UI login."""
+    if token or ui_password_hash or is_loopback(host):
         return False
     log.warning(
-        "serving on %s without OMNIFETCH_TOKEN: anyone who can reach this "
-        "port can edit plugin configs and control downloads", host,
+        "serving on %s without OMNIFETCH_TOKEN and without a Web UI login "
+        "password: anyone who can reach this port can edit plugin configs "
+        "and control downloads", host,
     )
     return True
 
@@ -82,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
 
         from .app import create_app
 
-        warn_if_exposed(args.host, settings.token)
+        warn_if_exposed(args.host, settings.token, settings.ui_password_hash)
         ctx = build_context(settings)  # one context shared by UI and scheduler
         stop_event = threading.Event()
         threading.Thread(

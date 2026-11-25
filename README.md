@@ -10,7 +10,7 @@ python -m venv .venv
 omnifetch init-db                                 # 初始化 SQLite（含全部唯一约束）
 omnifetch run --once                              # 跑一轮调度：抓取→入库→生成任务
 omnifetch run                                     # 持续调度
-omnifetch serve                                   # Web UI + API，默认只监听 127.0.0.1:8080
+omnifetch serve                                   # Web UI + API，默认监听 0.0.0.0:8080（局域网可访问）
 pytest                                            # 核心逻辑测试
 ```
 
@@ -47,11 +47,10 @@ ui_password_hash = "scrypt$16384$8$1$..."
 避免被无限尝试。UI 登录与 API 令牌相互独立：`OMNIFETCH_TOKEN` 仍只保护 `/api/*`，
 两者都设置时同时生效；页面即使已登录，API 调用仍需令牌。
 
-`serve` 默认只绑定 `127.0.0.1`。需要从局域网或容器外访问时，显式传 `--host 0.0.0.0`
-（Docker 镜像的 compose 已这样配置），并**同时设置 UI 登录密码或 `OMNIFETCH_TOKEN`**；
-未设置任何认证却绑定非回环地址时，启动日志会输出告警，此时同网段任何人都能修改
-插件配置、控制下载。经公网访问请放在 HTTPS 反向代理之后（登录 Cookie 在 https 下
-自动加 `Secure`）。
+`serve` 默认绑定 `0.0.0.0`，局域网设备可直接访问；只想本机访问时传 `--host 127.0.0.1`。
+若既没有设置 `OMNIFETCH_TOKEN`、也没有配置 UI 登录密码，启动日志会输出明确告警
+（仅告警，不拒绝启动），此时同网段任何人都能修改插件配置、控制下载。经公网访问请
+放在 HTTPS 反向代理之后（登录 Cookie 在 https 下自动加 `Secure`）。
 
 ## 配置
 

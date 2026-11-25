@@ -163,10 +163,11 @@ def test_env_prefers_new_prefix_and_still_accepts_legacy(monkeypatch, tmp_path):
     assert load_settings().db_path == str(tmp_path / "old.db")
 
 
-def test_serve_binds_loopback_by_default():
+def test_serve_binds_all_interfaces_by_default():
     from omnifetch.__main__ import build_parser
 
-    assert build_parser().parse_args(["serve"]).host == "127.0.0.1"
+    assert build_parser().parse_args(["serve"]).host == "0.0.0.0"
+    assert build_parser().parse_args(["serve", "--host", "127.0.0.1"]).host == "127.0.0.1"
 
 
 def test_unauthenticated_non_loopback_bind_warns(caplog):
@@ -183,6 +184,8 @@ def test_unauthenticated_non_loopback_bind_warns(caplog):
     caplog.clear()
     assert warn_if_exposed("127.0.0.1", "") is False
     assert warn_if_exposed("0.0.0.0", "s3cret") is False
+    # A UI login password is also enough to suppress the warning.
+    assert warn_if_exposed("0.0.0.0", "", "scrypt$16384$8$1$x$y") is False
     assert caplog.text == ""
 
 
