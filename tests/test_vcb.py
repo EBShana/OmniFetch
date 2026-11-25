@@ -91,7 +91,8 @@ def test_www_nyaa_mirror_is_recognized_and_resolved(crawler):
 
 
 def test_dmhy_page_magnet_extracted(crawler, monkeypatch):
-    monkeypatch.setattr(vcb, "_http_get", lambda url, proxy: DMHY_PAGE)
+    monkeypatch.setattr(vcb, "_http_get",
+                        lambda url, proxy, **kw: DMHY_PAGE)
     uris, rtype = crawler._resolve_mirror(
         "dmhy", "https://share.dmhy.org/topics/view/730693_x.html", None
     )
@@ -101,7 +102,8 @@ def test_dmhy_page_magnet_extracted(crawler, monkeypatch):
 
 def test_fetch_emits_one_resource_per_resolvable_mirror(crawler, monkeypatch):
     monkeypatch.setattr(crawler, "_make_backend", lambda: FakeBackend(VCB_PAGE))
-    monkeypatch.setattr(vcb, "_http_get", lambda url, proxy: DMHY_PAGE)
+    monkeypatch.setattr(vcb, "_http_get",
+                        lambda url, proxy, **kw: DMHY_PAGE)
     results = crawler.fetch()
     by_site = {r.source: r for r in results}
     assert set(by_site) == {"vcb-nyaa", "vcb-dmhy"}
@@ -131,7 +133,8 @@ def test_partial_page_failure_keeps_successful_rows(crawler, monkeypatch):
             pass
 
     monkeypatch.setattr(crawler, "_make_backend", lambda: _SequenceBackend())
-    monkeypatch.setattr(vcb, "_http_get", lambda url, proxy: DMHY_PAGE)
+    monkeypatch.setattr(vcb, "_http_get",
+                        lambda url, proxy, **kw: DMHY_PAGE)
     results = crawler.fetch()
     assert results                       # first row still produced resources
 
@@ -140,3 +143,81 @@ def test_empty_sheet_is_not_an_error(crawler, monkeypatch):
     monkeypatch.setattr(crawler, "_fetch_sheet", lambda proxy: [])
     monkeypatch.setattr(crawler, "_make_backend", lambda: FakeBackend(None))
     assert crawler.fetch() == []
+
+
+class _FakeResponse:
+    def __init__(self, code: int):
+        self.status_code = code
+        self.text = "page"
+
+
+def _fake_client(sequence: list):
+    class _Client:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url):
+            item = sequence.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return _FakeResponse(item)
+
+    return _Client
+
+
+def test_mirror_fetch_retries_502_with_exponential_backoff(monkeypatch):
+    calls: list[int] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr(vcb.httpx, "Client", _fake_client([502, 502, 200]))
+    monkeypatch.setattr(vcb.time, "sleep", sleeps.append)
+
+    assert vcb._http_get("u", None, retries=2, backoff=2.0) == "page"
+    assert sleeps == [2.0, 4.0]
+
+
+def test_mirror_fetch_retries_network_errors(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(vcb.httpx, "Client",
+                        _fake_client([vcb.httpx.ConnectError("boom"), 200]))
+    monkeypatch.setattr(vcb.time, "sleep", sleeps.append)
+
+    assert vcb._http_get("u", None, retries=1, backoff=1.5) == "page"
+    assert sleeps == [1.5]
+
+
+def test_mirror_fetch_gives_up_after_retries(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(vcb.httpx, "Client", _fake_client([502, 502, 502]))
+    monkeypatch.setattr(vcb.time, "sleep", sleeps.append)
+
+    assert vcb._http_get("u", None, retries=2, backoff=2.0) is None
+    assert sleeps == [2.0, 4.0]
+
+
+def test_mirror_fetch_does_not_retry_404(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(vcb.httpx, "Client", _fake_client([404]))
+    monkeypatch.setattr(vcb.time, "sleep", sleeps.append)
+
+    assert vcb._http_get("u", None, retries=2) is None
+    assert sleeps == []
+
+
+def test_dmhy_resolution_uses_configured_retry_policy(crawler, monkeypatch):
+    seen = {}
+
+    def fake_get(url, proxy, **kw):
+        seen.update(kw)
+        return DMHY_PAGE
+
+    monkeypatch.setattr(vcb, "_http_get", fake_get)
+    crawler.config["mirror_retries"] = 3
+    crawler.config["mirror_backoff"] = 0.5
+    crawler._resolve_mirror("dmhy", "https://share.dmhy.org/topics/view/1_x.html", None)
+    assert seen == {"retries": 3, "backoff": 0.5}

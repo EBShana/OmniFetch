@@ -29,6 +29,7 @@ import csv
 import io
 import logging
 import re
+import time
 from typing import Iterator
 from urllib.parse import urlparse
 
@@ -50,7 +51,8 @@ class VcbCrawler(CrawlerPlugin):
     type = "vcb"
     DEFAULT_CONFIG = {"sheet_id": "", "gid": "0", "interval": 1800,
                       "max_pages_per_run": 30, "batch_size": 20,
-                      "delay": 2.0, "backend": "cookie"}
+                      "delay": 2.0, "backend": "cookie",
+                      "mirror_retries": 2, "mirror_backoff": 2.0}
 
     def fetch(self) -> list[Resource]:
         return [r for batch in self.fetch_batches() for r in batch.resources]
@@ -162,7 +164,11 @@ class VcbCrawler(CrawlerPlugin):
             if match:
                 return [f"https://nyaa.si/download/{match.group(1)}.torrent"], ResourceType.TORRENT
         if site == "dmhy":
-            html = _http_get(page_url, proxy)
+            html = _http_get(
+                page_url, proxy,
+                retries=int(self.config.get("mirror_retries", 2)),
+                backoff=float(self.config.get("mirror_backoff", 2.0)),
+            )
             if html:
                 magnets = _MAGNET_RE.findall(html)
                 if magnets:
@@ -245,15 +251,37 @@ class _PlaywrightBackend:
 
 # ----------------------------------------------------------------- helpers
 
-def _http_get(url: str, proxy: str | None) -> str | None:
-    try:
-        with httpx.Client(proxy=proxy, timeout=30, follow_redirects=True) as client:
-            response = client.get(url)
-        if response.status_code == 200:
-            return response.text
-        log.warning("mirror fetch %s -> http %s", url, response.status_code)
-    except httpx.HTTPError as exc:
-        log.warning("mirror fetch %s failed: %s", url, exc)
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def _http_get(url: str, proxy: str | None, retries: int = 2,
+              backoff: float = 2.0) -> str | None:
+    """Fetch a mirror page, retrying transient 5xx/429 and network errors.
+
+    dmhy regularly answers 502 for a while and then recovers; without a
+    retry every such row loses its only magnet. Backoff grows exponentially
+    (backoff, 2*backoff, ...), and 4xx other than 429 is not retried.
+    """
+    attempts = max(0, retries) + 1
+    for attempt in range(attempts):
+        try:
+            with httpx.Client(proxy=proxy, timeout=30, follow_redirects=True) as client:
+                response = client.get(url)
+            status = response.status_code
+            if status == 200:
+                return response.text
+            if status not in _RETRY_STATUS or attempt >= attempts - 1:
+                log.warning("mirror fetch %s -> http %s", url, status)
+                return None
+            log.info("mirror fetch %s -> http %s, retry %d/%d",
+                     url, status, attempt + 1, retries)
+        except httpx.HTTPError as exc:
+            if attempt >= attempts - 1:
+                log.warning("mirror fetch %s failed: %s", url, exc)
+                return None
+            log.info("mirror fetch %s failed: %s, retry %d/%d",
+                     url, exc, attempt + 1, retries)
+        time.sleep(backoff * (2 ** attempt))
     return None
 
 
