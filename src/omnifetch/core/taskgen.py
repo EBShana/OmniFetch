@@ -115,11 +115,10 @@ def advance_want(
             best, downloader = candidate, name
             break
     if best is None:
-        conn.execute(
-            "UPDATE wants SET status='GIVEN_UP', updated_at=? WHERE id=?",
-            (iso(now), want_id),
-        )
-        conn.commit()
+        # No downloader accepts any candidate right now (plugin disabled or an
+        # unsupported resource type). That is not "the work is unobtainable":
+        # keep the want WANTED so it resumes as soon as a downloader returns.
+        # GIVEN_UP is reserved for an actually exhausted candidate chain.
         return "NO_DOWNLOADER"
 
     stamp = iso(now)

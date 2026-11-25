@@ -227,14 +227,17 @@ def test_no_downloader_falls_through_to_next_candidate(conn):
     assert fetch_want(conn, want_id).status == WantStatus.WANTED
 
 
-def test_no_downloader_for_any_candidate_gives_up(conn):
+def test_no_downloader_keeps_want_waiting(conn):
     res, _ = ingest.ingest_resource(
         conn, make_resource("https://a.example/1", "Work 1080p")
     )
     want_id = attach(conn, res)
 
     assert taskgen.advance_want(conn, want_id, lambda r: None, utcnow()) == "NO_DOWNLOADER"
-    assert fetch_want(conn, want_id).status == WantStatus.GIVEN_UP
+    assert fetch_want(conn, want_id).status == WantStatus.WANTED
+
+    # A downloader coming back must pick the waiting want up automatically.
+    assert taskgen.advance_want(conn, want_id, DL, utcnow()) == "NEW_TASK"
 
 
 def test_preference_lists_rank_by_position():
