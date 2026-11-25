@@ -57,6 +57,8 @@ _QR_PROMPT = "https://qrcodeapi.115.com/api/2.0/prompt.php"
 _QR_LOGIN = "https://qrcodeapi.115.com/app/1.0/web/1.0/login/qrcode/"
 _SIGN_URL = "https://115.com/?ct=clouddownload&ac=space"
 _CLOUD = "https://clouddownload.115.com/"
+# 添加任务只接受 /web/ 路径且 ac 放在表单；根路径会返回“请升级新版本”。
+_CLOUD_WEB = "https://clouddownload.115.com/web/"
 
 _PERMANENT_ERROR_KEYWORDS = (
     "已存在", "登录", "cookie", "无效的链接", "不支持的链接", "链接错误", "不存在",
@@ -214,7 +216,7 @@ class P115Api:
 
     def _check(self, data: dict, action: str) -> dict:
         if not data.get("state"):
-            raise _map_error(data.get("error", ""), action)
+            raise _map_error(data.get("error_msg") or data.get("error", ""), action)
         return data
 
     # -- sign（添加任务类接口需要；缓存 10 分钟）
@@ -229,20 +231,17 @@ class P115Api:
     # -- offline operations
     def add_task_url(self, url: str, wp_path_id: str = "0",
                      savepath: str = "") -> dict:
-        sign, ts = self._sign_token()
-        data = self._request("POST", _CLOUD, params={"ac": "add_task_url"},
+        data = self._request("POST", _CLOUD_WEB,
                              data={"url": url, "wp_path_id": wp_path_id,
-                                   "savepath": savepath, "sign": sign, "time": ts})
+                                   "savepath": savepath, "ac": "add_task_url"})
         return self._check(data, "添加离线任务")
 
     def add_task_bt(self, info_hash: str, wp_path_id: str = "0",
                     savepath: str = "") -> dict:
-        sign, ts = self._sign_token()
-        data = self._request("POST", _CLOUD, params={"ac": "add_task_bt"},
+        data = self._request("POST", _CLOUD_WEB,
                              data={"info_hash": info_hash,
                                    "wp_path_id": wp_path_id,
-                                   "savepath": savepath,
-                                   "sign": sign, "time": ts})
+                                   "savepath": savepath, "ac": "add_task_bt"})
         return self._check(data, "添加离线任务")
 
     def task_lists(self, page: int = 1, page_size: int = 30, stat: int = 0) -> dict:
@@ -551,15 +550,19 @@ class P115Downloader(DownloaderPlugin):
                               error_message="115 离线任务不存在（可能已过期或被删除）")
         self._submitted.pop(external_id, None)
         actions = task.get("available_actions") or []
-        # 失败样本未观测到：display_status 的失败枚举值待真机确认，
-        # 目前只把 retry action 作为失败信号。
-        if "retry" in actions:
-            if external_id not in self._restarts:
-                if self._request_restart(external_id, task):
+        # 真机失败样本：status=-1、display_status=failed、status_text=下载失败，
+        # 且 available_actions 里没有 retry；retry 分支保留给确实带该动作的任务。
+        failed = (str(task.get("display_status") or "") == "failed"
+                  or int(task.get("status") or 0) == -1
+                  or "失败" in str(task.get("status_text") or ""))
+        if failed or "retry" in actions:
+            if "retry" in actions:
+                if external_id not in self._restarts:
+                    if self._request_restart(external_id, task):
+                        return TaskResult(PollStatus.PROGRESS, queued=True)
+                elif self._in_restart_window(external_id):
+                    # 刚重启过还没见效：不重复重启，也不急着判死
                     return TaskResult(PollStatus.PROGRESS, queued=True)
-            elif self._in_restart_window(external_id):
-                # 刚重启过还没见效：不重复重启，也不急着判死
-                return TaskResult(PollStatus.PROGRESS, queued=True)
             # 重启失败，或重启过一轮窗口过了仍然失败：降级永久失败
             self._restarts.pop(external_id, None)
             return TaskResult(PollStatus.FAILED, error_kind=ErrorKind.PERMANENT,

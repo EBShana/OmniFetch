@@ -243,6 +243,36 @@ def test_poll_real_finished_payload_is_done():
     assert result.progress == 1.0
 
 
+def test_poll_real_waiting_payload_is_queued():
+    # 真机等待态：status=1、display_status=waiting、percentDone=0
+    task = {
+        "info_hash": "ab" * 20, "url": "https://x/f.zip",
+        "status": 1, "display_status": "waiting", "status_text": "等待中",
+        "percentDone": 0, "display_percent": 0,
+        "available_actions": ["pause", "copy", "delete"],
+    }
+    result = make(FakeApi(tasks=[task])).poll("hash:" + "ab" * 20)
+    assert result.status == PollStatus.PROGRESS
+    assert result.queued is True
+
+
+def test_poll_real_failed_payload_is_permanent():
+    # 真机失败态：status=-1、display_status=failed，且没有 retry action
+    task = {
+        "info_hash": "ab" * 20, "url": "https://x/dead.bin",
+        "status": -1, "display_status": "failed", "status_text": "下载失败",
+        "percentDone": 0, "display_percent": 0,
+        "available_actions": ["copy", "delete"],
+        "retry_count": 0, "retry_limit": 3,
+    }
+    dl = make(FakeApi(tasks=[task]))
+    result = dl.poll("hash:" + "ab" * 20)
+    assert result.status == PollStatus.FAILED
+    assert result.error_kind == ErrorKind.PERMANENT
+    assert "下载失败" in result.error_message
+    assert dl._restarts == {}
+
+
 def test_poll_missing_task_is_permanent_failure():
     dl = make(FakeApi(tasks=[]))
     result = dl.poll("hash:" + "cc" * 20)
@@ -453,6 +483,35 @@ def test_task_del_posts_hash0_with_signature():
                              "time": "1700000000"}
 
 
+def test_add_tasks_post_to_web_endpoint():
+    api = P115Api("missing.json")
+    calls: list[dict] = []
+
+    class _Response:
+        status_code = 200
+
+        def json(self):
+            return {"state": True, "info_hash": "b82874bef1dcaabfc9ee2a24cee91646115"}
+
+    class _Client:
+        def request(self, method, url, **kw):
+            calls.append({"method": method, "url": url, **kw})
+            return _Response()
+
+    api._client.close()
+    api._client = _Client()
+
+    api.add_task_url("https://x/f.zip", "123", "anime")
+    api.add_task_bt("ab" * 20, "123", "anime")
+
+    assert calls[0]["url"] == "https://clouddownload.115.com/web/"
+    assert calls[0]["data"] == {"url": "https://x/f.zip", "wp_path_id": "123",
+                                "savepath": "anime", "ac": "add_task_url"}
+    assert calls[1]["data"] == {"info_hash": "ab" * 20, "wp_path_id": "123",
+                                "savepath": "anime", "ac": "add_task_bt"}
+    assert "params" not in calls[0] and "params" not in calls[1]
+
+
 def test_restart_task_maps_115_error():
     api = P115Api("missing.json")
 
@@ -460,7 +519,7 @@ def test_restart_task_maps_115_error():
         status_code = 200
 
         def json(self):
-            return {"state": False, "error": "任务不存在"}
+            return {"state": False, "error_msg": "用户任务不存在", "errcode": 10021}
 
     class _Client:
         def request(self, method, url, **kw):
