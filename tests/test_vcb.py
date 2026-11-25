@@ -109,3 +109,34 @@ def test_fetch_emits_one_resource_per_resolvable_mirror(crawler, monkeypatch):
     assert nyaa.download_uris[0].endswith("2184807.torrent")
     assert "Guild no Uketsukejou" in nyaa.title or "Mayonaka Heart Tune" in nyaa.title
     assert nyaa.extra["vcb_uid"] in {"261102", "261101"}
+
+
+def test_all_pages_failed_raises_instead_of_empty_success(crawler, monkeypatch):
+    # CF block / dead cookie: every page returns non-200. A silent [] would be
+    # recorded as a successful run and silence the source for its interval.
+    monkeypatch.setattr(crawler, "_make_backend", lambda: FakeBackend(None))
+    with pytest.raises(vcb.CrawlError):
+        crawler.fetch()
+
+
+def test_partial_page_failure_keeps_successful_rows(crawler, monkeypatch):
+    class _SequenceBackend:
+        def __init__(self):
+            self._htmls = [VCB_PAGE, None]
+
+        def fetch(self, url):
+            return self._htmls.pop(0)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(crawler, "_make_backend", lambda: _SequenceBackend())
+    monkeypatch.setattr(vcb, "_http_get", lambda url, proxy: DMHY_PAGE)
+    results = crawler.fetch()
+    assert results                       # first row still produced resources
+
+
+def test_empty_sheet_is_not_an_error(crawler, monkeypatch):
+    monkeypatch.setattr(crawler, "_fetch_sheet", lambda proxy: [])
+    monkeypatch.setattr(crawler, "_make_backend", lambda: FakeBackend(None))
+    assert crawler.fetch() == []

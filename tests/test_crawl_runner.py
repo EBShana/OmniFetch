@@ -11,7 +11,7 @@ from omnifetch.config import Settings
 from omnifetch.core.db import connect, init_db
 from omnifetch.core.models import Resource, ResourceType
 from omnifetch.core.util import iso, utcnow
-from omnifetch.crawlers.base import CrawlBatch, CrawlInterrupted, CrawlerPlugin
+from omnifetch.crawlers.base import CrawlBatch, CrawlError, CrawlInterrupted, CrawlerPlugin
 from omnifetch.scheduler import runner, trigger
 
 
@@ -111,6 +111,33 @@ def test_stop_interrupts_crawl_and_keeps_ingested_batch(tmp_path):
     row = conn.execute("SELECT * FROM source_runs").fetchone()
     assert row["finished_at"] is not None
     assert row["error"].startswith("interrupted")
+    conn.close()
+
+
+def test_crawl_error_is_recorded_not_silently_successful(tmp_path):
+    class _AllFailedCrawler(CrawlerPlugin):
+        def __init__(self):
+            super().__init__("broken", {"interval": 86400})
+
+        def fetch(self):
+            raise CrawlError("全部 2 个页面获取失败")
+
+        def fetch_batches(self):
+            yield CrawlBatch([], done=0, total=2)
+            raise CrawlError("全部 2 个页面获取失败")
+
+    conn = connect(str(tmp_path / "crawl.db"))
+    init_db(conn)
+    ctx = runner.Context(
+        Settings(db_path=str(tmp_path / "crawl.db"), config_dir=str(tmp_path / "cfg")),
+        {"broken": _AllFailedCrawler()}, {}, [],
+    )
+    trigger.run_due_crawlers(conn, ctx, utcnow())
+    ctx.wait_crawlers(5)
+
+    row = conn.execute("SELECT * FROM source_runs").fetchone()
+    assert row["finished_at"] is not None
+    assert "CrawlError" in row["error"] and "全部 2 个页面获取失败" in row["error"]
     conn.close()
 
 

@@ -36,7 +36,7 @@ import httpx
 
 from ..core.models import Resource, ResourceType
 from . import register
-from .base import CrawlBatch, CrawlInterrupted, CrawlerPlugin
+from .base import CrawlBatch, CrawlError, CrawlInterrupted, CrawlerPlugin
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +68,8 @@ class VcbCrawler(CrawlerPlugin):
         backend = self._make_backend()
         pending: list[Resource] = []
         done = 0
+        attempted = 0
+        succeeded = 0
         stopped = False
 
         try:
@@ -77,12 +79,14 @@ class VcbCrawler(CrawlerPlugin):
                     break
                 link = row.get("link") or ""
                 if link:
+                    attempted += 1
                     try:
                         html = backend.fetch(link)
                     except Exception as exc:
                         log.warning("vcb page fetch failed %s: %s", link, exc)
                         html = None
                     if html is not None:
+                        succeeded += 1
                         pending.extend(self._expand_row(row, html, proxy))
                 done += 1
                 if done % batch_size == 0:
@@ -91,13 +95,20 @@ class VcbCrawler(CrawlerPlugin):
                 if delay and not self.sleep(delay):
                     stopped = True
                     break
+            if stopped:
+                if pending:
+                    yield CrawlBatch(pending, done, total)
+                raise CrawlInterrupted(f"已处理 {done}/{total} 行后中止")
+            # Every page failing is a source failure (expired cookie, CF block,
+            # proxy down), not a legitimately empty sheet. Reporting success
+            # here would silence the source for a whole interval.
+            if attempted and not succeeded:
+                raise CrawlError(
+                    f"全部 {attempted} 个 VCB 页面获取失败（Cookie/Cloudflare/代理）")
             if pending or (done and done % batch_size):
                 yield CrawlBatch(pending, done, total)
         finally:
             backend.close()
-
-        if stopped:
-            raise CrawlInterrupted(f"已处理 {done}/{total} 行后中止")
 
     # ------------------------------------------------------------- sheet
 
