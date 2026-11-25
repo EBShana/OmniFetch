@@ -15,7 +15,9 @@ Config keys (downloaders.d/*.toml):
   target_dir_id  离线保存目录 id，默认 "0"（网盘根目录）
   savepath       目录下的相对子路径，默认 ""
   proxy          可选；仅用于抓取 .torrent 文件解析 infohash，115 本身直连
-  user_agent     可选
+  submit_grace_seconds  新任务在列表里出现前的宽限期，默认 90 秒
+  snapshot_ttl   任务列表快照的复用时长（秒），默认 10
+  user_agent     可选（当前未生效，见开发清单）
 
 external_id 约定：`hash:<btih>`（磁链/种子）或 `url:<uri>`（http/ftp/ed2k），
 任务列表按 info_hash / url 匹配。
@@ -42,6 +44,8 @@ log = logging.getLogger(__name__)
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 _BTITH_RE = re.compile(r"btih:([0-9a-zA-Z]{32,40})")
+# 安全上限：防 page_count 异常时无限翻页；触发后明确标记结果不完整。
+_MAX_SCAN_PAGES = 100
 
 _QR_TOKEN = "https://qrcodeapi.115.com/api/1.0/web/1.0/token/"
 _QR_PROMPT = "https://qrcodeapi.115.com/api/2.0/prompt.php"
@@ -284,7 +288,8 @@ class P115Downloader(DownloaderPlugin):
     accepts = (ResourceType.MAGNET, ResourceType.TORRENT, ResourceType.HTTP,
                ResourceType.NETDISK)
     DEFAULT_CONFIG = {"cookie_file": "data/p115_cookies.json",
-                      "target_dir_id": "0", "savepath": "", "proxy": ""}
+                      "target_dir_id": "0", "savepath": "", "proxy": "",
+                      "submit_grace_seconds": 90, "snapshot_ttl": 10}
 
     def __init__(self, name: str, config: dict):
         super().__init__(name, config)
@@ -293,6 +298,13 @@ class P115Downloader(DownloaderPlugin):
         self._savepath = config.get("savepath") or ""
         self._proxy = config.get("proxy") or None
         self._api: P115Api | None = None
+        self._grace = float(config.get("submit_grace_seconds", 90) or 0)
+        self._submitted: dict[str, float] = {}  # external_id -> 提交时刻
+        self._max_scan_pages = _MAX_SCAN_PAGES
+        self._snapshot_tasks: list[dict] | None = None
+        self._snapshot_complete = True
+        self._snapshot_at = 0.0
+        self._now = time.monotonic
 
     def _get_api(self) -> P115Api:
         if self._api is None:
@@ -315,22 +327,40 @@ class P115Downloader(DownloaderPlugin):
         try:
             if magnet:
                 api.add_task_url(uri, self._target_dir, self._savepath)
-                return f"hash:{btih_hex(magnet.group(1))}"
-            if resource.resource_type == ResourceType.TORRENT or \
+                key = f"hash:{btih_hex(magnet.group(1))}"
+            elif resource.resource_type == ResourceType.TORRENT or \
                     uri.lower().endswith(".torrent"):
                 # .torrent 文件：解析 infohash 后走 bt 接口（无需上传种子）
                 digest = torrent_infohash(self._fetch_torrent(uri))
                 api.add_task_bt(digest, self._target_dir)
-                return f"hash:{digest}"
-            api.add_task_url(uri, self._target_dir, self._savepath)
-            return f"url:{uri}"
+                key = f"hash:{digest}"
+            else:
+                api.add_task_url(uri, self._target_dir, self._savepath)
+                key = f"url:{uri}"
         except DownloadError as exc:
             # 任务已存在 = 幂等成功：返回既有任务的 external_id
-            if "已存在" in str(exc):
-                existing = self._find_task(uri)
-                if existing is not None:
-                    return self._task_key(existing, fallback_uri=uri)
-            raise
+            if "已存在" not in str(exc):
+                raise
+            existing = self._find_task(uri, force=True)[0]
+            if existing is None:
+                raise
+            key = self._task_key(existing, fallback_uri=uri)
+        self._remember_submitted(key)
+        return key
+
+    def _remember_submitted(self, key: str) -> None:
+        """记录提交时刻：115 列表入库有延迟，宽限期内 poll 不判失败。"""
+        now = self._now()
+        self._submitted[key] = now
+        cutoff = now - max(self._grace * 4, 600)
+        for stale in [k for k, ts in self._submitted.items() if ts < cutoff]:
+            del self._submitted[stale]
+        # 新任务还不在这份快照里，强制下一轮重新扫描
+        self._snapshot_tasks = None
+
+    def _in_submit_grace(self, key: str) -> bool:
+        submitted_at = self._submitted.get(key)
+        return submitted_at is not None and self._now() - submitted_at <= self._grace
 
     def _fetch_torrent(self, url: str) -> bytes:
         try:
@@ -343,14 +373,36 @@ class P115Downloader(DownloaderPlugin):
 
     # --------------------------------------------------------------- query
 
-    def _iter_tasks(self, max_pages: int = 5):
+    def _scan_all_tasks(self) -> tuple[list[dict], bool]:
+        """翻完所有分页；触到安全上限时明确返回“不完整”，绝不静默截断。"""
         api = self._get_api()
-        for page in range(1, max_pages + 1):
+        found: list[dict] = []
+        page = 1
+        while True:
             data = api.task_lists(page=page, stat=0)
             tasks = data.get("tasks") or []
-            yield from tasks
-            if page >= int(data.get("page_count") or 1) or not tasks:
-                break
+            found.extend(tasks)
+            if not tasks or page >= int(data.get("page_count") or 1):
+                return found, True
+            page += 1
+            if page > self._max_scan_pages:
+                log.warning(
+                    "115 任务列表超过扫描上限 %d 页，本次结果不完整",
+                    self._max_scan_pages,
+                )
+                return found, False
+
+    def _tasks_snapshot(self, force: bool = False) -> tuple[list[dict], bool]:
+        """一个 TTL 内复用同一份任务列表，避免每个任务每轮都全量翻页。"""
+        ttl = float(self.config.get("snapshot_ttl", 10) or 0)
+        if (not force and self._snapshot_tasks is not None
+                and self._now() - self._snapshot_at < ttl):
+            return self._snapshot_tasks, self._snapshot_complete
+        tasks, complete = self._scan_all_tasks()
+        self._snapshot_tasks = tasks
+        self._snapshot_complete = complete
+        self._snapshot_at = self._now()
+        return tasks, complete
 
     def _task_key(self, task: dict, fallback_uri: str = "") -> str:
         info_hash = (task.get("info_hash") or "").lower()
@@ -358,27 +410,37 @@ class P115Downloader(DownloaderPlugin):
             return f"hash:{info_hash}"
         return f"url:{task.get('url') or fallback_uri}"
 
-    def _find_task(self, uri_or_key: str) -> dict | None:
+    def _find_task(self, uri_or_key: str, force: bool = False) -> tuple[dict | None, bool]:
+        """按 external_id 找任务；第二个返回值表示列表是否扫全。"""
         needle = uri_or_key.lower()
         magnet = _BTITH_RE.search(needle)
         want_hash = (needle[5:] if needle.startswith("hash:")
                      else btih_hex(magnet.group(1)) if magnet else "")
-        for task in self._iter_tasks():
+        tasks, complete = self._tasks_snapshot(force=force)
+        for task in tasks:
             if want_hash and (task.get("info_hash") or "").lower() == want_hash:
-                return task
+                return task, complete
             if (task.get("url") or "").lower() == needle:
-                return task
+                return task, complete
             if self._task_key(task).lower() == needle:
-                return task
-        return None
+                return task, complete
+        return None, complete
 
     # ------------------------------------------------------------ contract
 
     def poll(self, external_id: str) -> TaskResult:
-        task = self._find_task(external_id)
+        task, complete = self._find_task(external_id)
         if task is None:
+            if not complete:
+                # 列表没扫全时“找不到”不可信，宁可等下一轮也不要误杀任务
+                log.warning("115 任务列表未扫全，暂不判定任务 %s 失败", external_id)
+                return TaskResult(PollStatus.PROGRESS)
+            if self._in_submit_grace(external_id):
+                # 刚提交的任务可能还没出现在 115 的任务列表里
+                return TaskResult(PollStatus.PROGRESS)
             return TaskResult(PollStatus.FAILED, error_kind=ErrorKind.PERMANENT,
                               error_message="115 离线任务不存在（可能已过期或被删除）")
+        self._submitted.pop(external_id, None)
         fail_msg = task.get("fail_msg") or ""
         actions = task.get("available_actions") or []
         if fail_msg or "retry" in actions:
@@ -394,7 +456,7 @@ class P115Downloader(DownloaderPlugin):
         if not uri:
             return False
         try:
-            return self._find_task(uri) is not None
+            return self._find_task(uri)[0] is not None
         except DownloadError:
             return False
 
@@ -405,7 +467,8 @@ class P115Downloader(DownloaderPlugin):
 
     def ping(self) -> tuple[bool, str]:
         try:
-            data = self._get_api().task_lists(page=1, page_size=1)
-            return True, f"115 在线，离线任务共 {data.get('count', '?')} 个"
+            tasks, complete = self._tasks_snapshot()
         except DownloadError as exc:
             return False, str(exc)
+        suffix = "" if complete else "（列表未扫完）"
+        return True, f"115 在线，离线任务共 {len(tasks)} 个{suffix}"

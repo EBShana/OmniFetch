@@ -23,9 +23,11 @@ DIGEST = hashlib.sha1(INFO).hexdigest()
 
 
 class FakeApi:
-    def __init__(self, tasks=None, add_error=None):
+    def __init__(self, tasks=None, add_error=None, pages=None):
         self.tasks = tasks or []
         self.add_error = add_error
+        self.pages = pages  # {page: [task, ...]}；None 表示只有一页
+        self.calls = 0
         self.added_urls: list[str] = []
         self.added_bts: list[str] = []
         self.deleted: list[str] = []
@@ -43,6 +45,11 @@ class FakeApi:
         return {"state": True}
 
     def task_lists(self, page=1, page_size=30, stat=0):
+        self.calls += 1
+        if self.pages is not None:
+            return {"state": True, "tasks": self.pages.get(page, []),
+                    "page": page, "page_count": len(self.pages),
+                    "count": sum(len(t) for t in self.pages.values())}
         return {"state": True, "tasks": self.tasks if page == 1 else [],
                 "page": page, "page_count": 1, "count": len(self.tasks)}
 
@@ -166,10 +173,82 @@ def test_poll_missing_task_is_permanent_failure():
     assert result.error_kind == ErrorKind.PERMANENT
 
 
+def test_poll_just_after_submit_uses_grace_period():
+    # 115 列表入库有延迟：刚提交的任务在宽限期内不能判永久失败。
+    dl = make(FakeApi(tasks=[]), submit_grace_seconds=60)
+    key = dl.submit(resource("magnet:?xt=urn:btih:" + "AA" * 20, ResourceType.MAGNET))
+    assert dl.poll(key).status == PollStatus.PROGRESS
+
+
+def test_poll_after_grace_period_is_permanent():
+    dl = make(FakeApi(tasks=[]), submit_grace_seconds=60)
+    now = [1000.0]
+    dl._now = lambda: now[0]
+    key = dl.submit(resource("magnet:?xt=urn:btih:" + "AA" * 20, ResourceType.MAGNET))
+    now[0] += 61
+    result = dl.poll(key)
+    assert result.status == PollStatus.FAILED
+    assert result.error_kind == ErrorKind.PERMANENT
+
+
+def test_task_found_clears_submit_grace():
+    dl = make(FakeApi(tasks=[_task(percent=10)]), submit_grace_seconds=60)
+    key = "hash:" + "ab" * 20
+    dl._submitted[key] = dl._now()
+    assert dl.poll(key).status == PollStatus.PROGRESS
+    assert key not in dl._submitted
+
+
 def test_poll_matches_by_url_key():
     dl = make(FakeApi(tasks=[_task(info_hash="", url="https://x/f.zip", percent=10)]))
     result = dl.poll("url:https://x/f.zip")
     assert result.status == PollStatus.PROGRESS
+
+
+def test_poll_scans_all_pages_not_just_first():
+    api = FakeApi(pages={1: [_task(info_hash="ee" * 20)], 2: [_task(percent=30)]})
+    result = make(api).poll("hash:" + "ab" * 20)
+    assert result.status == PollStatus.PROGRESS
+    assert abs(result.progress - 0.3) < 1e-6
+
+
+def test_incomplete_scan_is_not_permanent_failure():
+    pages = {page: [_task(info_hash="ee" * 20)] for page in range(1, 6)}
+    dl = make(FakeApi(pages=pages))
+    dl._max_scan_pages = 2
+    assert dl.poll("hash:" + "ab" * 20).status == PollStatus.PROGRESS
+
+
+def test_task_list_snapshot_is_reused_within_ttl():
+    api = FakeApi(tasks=[_task(info_hash="ab" * 20), _task(info_hash="cd" * 20)])
+    dl = make(api, snapshot_ttl=10)
+    now = [100.0]
+    dl._now = lambda: now[0]
+    dl.poll("hash:" + "ab" * 20)
+    dl.poll("hash:" + "cd" * 20)
+    assert api.calls == 1
+    now[0] += 11
+    dl.poll("hash:" + "ab" * 20)
+    assert api.calls == 2
+
+
+def test_submit_invalidates_task_list_snapshot():
+    api = FakeApi(tasks=[_task(info_hash="ab" * 20)])
+    dl = make(api, snapshot_ttl=60)
+    dl.poll("hash:" + "ab" * 20)
+    dl.submit(resource("magnet:?xt=urn:btih:" + "AA" * 20, ResourceType.MAGNET))
+    dl.poll("hash:" + "cc" * 20)
+    assert api.calls == 2
+
+
+def test_submit_duplicate_found_on_later_page():
+    api = FakeApi(
+        pages={1: [_task(info_hash="ee" * 20)], 2: [_task(info_hash="aa" * 20)]},
+        add_error=DownloadError("115 添加离线任务: 任务已存在", ErrorKind.PERMANENT),
+    )
+    key = make(api).submit(
+        resource("magnet:?xt=urn:btih:" + "AA" * 20, ResourceType.MAGNET))
+    assert key == "hash:" + "aa" * 20
 
 
 # ---------------------------------------------------------- exists/cancel
