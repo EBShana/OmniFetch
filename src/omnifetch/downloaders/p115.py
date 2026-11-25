@@ -145,6 +145,8 @@ class P115Api:
         self._cookie_file = Path(cookie_file)
         self._client = httpx.Client(timeout=30, follow_redirects=False)
         self._client.headers["User-Agent"] = user_agent
+        self._cookies_mtime: float | None = None
+        self.cookie_expired = False
         self._load_cookies()
         self._sign: tuple[str, str] | None = None
         self._sign_at = 0.0
@@ -154,11 +156,28 @@ class P115Api:
 
     # -- cookies
     def _load_cookies(self) -> None:
-        if not self._cookie_file.is_file():
+        try:
+            mtime = self._cookie_file.stat().st_mtime
+        except OSError:
+            self._cookies_mtime = None
             return
         data = json.loads(self._cookie_file.read_text(encoding="utf-8"))
         for name, value in data.items():
             self._client.cookies.set(name, value, domain=".115.com")
+        self._cookies_mtime = mtime
+
+    def refresh_cookies(self) -> bool:
+        """Cookie 文件被重新扫码覆盖时热加载，避免必须重启进程。"""
+        try:
+            mtime = self._cookie_file.stat().st_mtime
+        except OSError:
+            return False
+        if self._cookies_mtime is not None and mtime == self._cookies_mtime:
+            return False
+        self._client.cookies.clear()
+        self._load_cookies()
+        self.cookie_expired = False
+        return True
 
     def save_cookies(self) -> None:
         wanted = {"UID", "CID", "SEID", "KID"}
@@ -173,17 +192,20 @@ class P115Api:
     def _request(self, method: str, url: str, **kw) -> dict:
         response = self._client.request(method, url, **kw)
         if response.status_code in (301, 302, 303, 307, 308):
+            self.cookie_expired = True
             raise DownloadError(
                 "115 Cookie 已失效（302 跳登录页），请重新运行 omnifetch 115-login 扫码",
                 ErrorKind.PERMANENT,
             )
         try:
-            return response.json()
+            data = response.json()
         except ValueError:
             raise DownloadError(
                 f"115 返回非 JSON（HTTP {response.status_code}）",
                 ErrorKind.TRANSIENT,
             ) from None
+        self.cookie_expired = False
+        return data
 
     def _check(self, data: dict, action: str) -> dict:
         if not data.get("state"):
@@ -208,11 +230,13 @@ class P115Api:
                                    "savepath": savepath, "sign": sign, "time": ts})
         return self._check(data, "添加离线任务")
 
-    def add_task_bt(self, info_hash: str, wp_path_id: str = "0") -> dict:
+    def add_task_bt(self, info_hash: str, wp_path_id: str = "0",
+                    savepath: str = "") -> dict:
         sign, ts = self._sign_token()
         data = self._request("POST", _CLOUD, params={"ac": "add_task_bt"},
                              data={"info_hash": info_hash,
                                    "wp_path_id": wp_path_id,
+                                   "savepath": savepath,
                                    "sign": sign, "time": ts})
         return self._check(data, "添加离线任务")
 
@@ -316,6 +340,16 @@ class P115Downloader(DownloaderPlugin):
             self._api = P115Api(self._cookie_file)
         return self._api
 
+    def _cookie_hint(self) -> str:
+        return (f"115 Cookie 已失效，请重新运行 omnifetch 115-login {self.name} "
+                "扫码后再试")
+
+    def _cookie_expired_result(self) -> TaskResult:
+        # 云端任务可能还在跑，判永久失败会让核心换源重下；标成可重试，
+        # 重新扫码后 submit 走“已存在”分支即可恢复跟踪。
+        return TaskResult(PollStatus.FAILED, error_kind=ErrorKind.TRANSIENT,
+                          error_message=self._cookie_hint())
+
     # -------------------------------------------------------------- submit
 
     def submit(self, resource: Resource) -> str:
@@ -323,6 +357,10 @@ class P115Downloader(DownloaderPlugin):
         if not uri:
             raise DownloadError("资源没有下载地址", ErrorKind.PERMANENT)
         api = self._get_api()
+        api.refresh_cookies()
+        if api.cookie_expired:
+            # 别再拿失效 Cookie 去撞 115 接口
+            raise DownloadError(self._cookie_hint(), ErrorKind.PERMANENT)
         magnet = _BTITH_RE.search(uri)
         try:
             if magnet:
@@ -332,7 +370,7 @@ class P115Downloader(DownloaderPlugin):
                     uri.lower().endswith(".torrent"):
                 # .torrent 文件：解析 infohash 后走 bt 接口（无需上传种子）
                 digest = torrent_infohash(self._fetch_torrent(uri))
-                api.add_task_bt(digest, self._target_dir)
+                api.add_task_bt(digest, self._target_dir, self._savepath)
                 key = f"hash:{digest}"
             else:
                 api.add_task_url(uri, self._target_dir, self._savepath)
@@ -429,7 +467,16 @@ class P115Downloader(DownloaderPlugin):
     # ------------------------------------------------------------ contract
 
     def poll(self, external_id: str) -> TaskResult:
-        task, complete = self._find_task(external_id)
+        api = self._get_api()
+        api.refresh_cookies()
+        if api.cookie_expired:
+            return self._cookie_expired_result()
+        try:
+            task, complete = self._find_task(external_id)
+        except DownloadError:
+            if api.cookie_expired:
+                return self._cookie_expired_result()
+            raise
         if task is None:
             if not complete:
                 # 列表没扫全时“找不到”不可信，宁可等下一轮也不要误杀任务
@@ -467,6 +514,10 @@ class P115Downloader(DownloaderPlugin):
 
     def ping(self) -> tuple[bool, str]:
         try:
+            api = self._get_api()
+            api.refresh_cookies()
+            if api.cookie_expired:
+                return False, self._cookie_hint()
             tasks, complete = self._tasks_snapshot()
         except DownloadError as exc:
             return False, str(exc)

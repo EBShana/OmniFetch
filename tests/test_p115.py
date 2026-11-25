@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -28,8 +29,10 @@ class FakeApi:
         self.add_error = add_error
         self.pages = pages  # {page: [task, ...]}；None 表示只有一页
         self.calls = 0
+        self.cookie_expired = False
         self.added_urls: list[str] = []
         self.added_bts: list[str] = []
+        self.added_bt_savepaths: list[str] = []
         self.deleted: list[str] = []
 
     def add_task_url(self, url, wp_path_id="0", savepath=""):
@@ -38,11 +41,15 @@ class FakeApi:
         self.added_urls.append(url)
         return {"state": True}
 
-    def add_task_bt(self, info_hash, wp_path_id="0"):
+    def add_task_bt(self, info_hash, wp_path_id="0", savepath=""):
         if self.add_error:
             raise self.add_error
         self.added_bts.append(info_hash)
+        self.added_bt_savepaths.append(savepath)
         return {"state": True}
+
+    def refresh_cookies(self):
+        return False
 
     def task_lists(self, page=1, page_size=30, stat=0):
         self.calls += 1
@@ -122,6 +129,14 @@ def test_submit_plain_http_gets_url_key():
     dl = make(api)
     key = dl.submit(resource("https://example.com/file.zip", ResourceType.HTTP))
     assert key == "url:https://example.com/file.zip"
+
+
+def test_submit_torrent_passes_savepath():
+    api = FakeApi()
+    dl = make(api, target_dir_id="123", savepath="anime/2025")
+    dl._fetch_torrent = lambda url: TORRENT  # stub network
+    dl.submit(resource("https://nyaa.si/download/1.torrent", ResourceType.TORRENT))
+    assert api.added_bt_savepaths == ["anime/2025"]
 
 
 def test_submit_duplicate_is_idempotent():
@@ -309,6 +324,55 @@ def test_submit_without_cookie_config_is_permanent():
         dl.submit(resource("magnet:?xt=urn:btih:" + "AA" * 20, ResourceType.MAGNET))
     assert exc_info.value.kind == ErrorKind.PERMANENT
     assert "115-login" in str(exc_info.value)
+
+
+def test_cookie_file_rewrite_clears_expired_flag(tmp_path):
+    path = tmp_path / "cookies.json"
+    path.write_text(json.dumps({"UID": "u1"}), encoding="utf-8")
+    api = P115Api(str(path))
+    api.cookie_expired = True
+    assert api.refresh_cookies() is False  # 文件没变，保持失效状态
+    path.write_text(json.dumps({"UID": "u2"}), encoding="utf-8")
+    os.utime(path, (path.stat().st_atime + 10, path.stat().st_mtime + 10))
+    assert api.refresh_cookies() is True
+    assert api.cookie_expired is False
+    assert api._client.cookies.get("UID") == "u2"
+
+
+def test_redirect_marks_cookie_expired():
+    api = P115Api("missing.json")
+
+    class _Response:
+        status_code = 302
+
+    class _Client:
+        def request(self, method, url, **kw):
+            return _Response()
+
+    api._client.close()
+    api._client = _Client()
+    with pytest.raises(DownloadError) as exc_info:
+        api._request("GET", "https://115.com/")
+    assert exc_info.value.kind == ErrorKind.PERMANENT
+    assert api.cookie_expired is True
+
+
+def test_expired_cookie_blocks_submit_and_poll_without_network():
+    api = FakeApi(tasks=[_task()])
+    api.cookie_expired = True
+    dl = make(api)
+    with pytest.raises(DownloadError) as exc_info:
+        dl.submit(resource("magnet:?xt=urn:btih:" + "AA" * 20, ResourceType.MAGNET))
+    assert exc_info.value.kind == ErrorKind.PERMANENT
+    assert "115-login" in str(exc_info.value)
+    result = dl.poll("hash:" + "ab" * 20)
+    assert result.status == PollStatus.FAILED
+    assert result.error_kind == ErrorKind.TRANSIENT
+    assert "115-login" in result.error_message
+    ok, detail = dl.ping()
+    assert not ok and "115-login" in detail
+    assert api.calls == 0  # 失效期间不再打 115 接口
+    assert api.added_urls == []
 
 
 # ------------------------------------------------------- error classification
