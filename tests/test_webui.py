@@ -318,6 +318,16 @@ def test_retry_next_ignores_downloading_task(client, env):
     assert tasks[task_id]["status"] == "IGNORED"
 
 
+def test_ui_retry_next_stops_a_downloading_task(client, env):
+    _, settings = env
+    want_id = _seed_want(settings)
+    _seed_task(settings, want_id, "DOWNLOADING")
+
+    response = client.post(f"/ui/wants/{want_id}/retry-next")
+    assert response.status_code == 200
+    assert client.get("/api/tasks").json()[0]["status"] == "IGNORED"
+
+
 def test_reopen_endpoint(client, env):
     _, settings = env
     want_id = _seed_want(settings)

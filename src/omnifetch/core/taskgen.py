@@ -137,6 +137,50 @@ def advance_want(
     return "NEW_TASK"
 
 
+def retry_next(
+    conn: sqlite3.Connection,
+    want_id: int,
+    downloader_for: DownloaderFor,
+    cancel: Callable[[str, str], None] | None,
+    now: datetime,
+) -> str | None:
+    """Abandon the current attempt and move the want to its next candidate.
+
+    Both the UI and the API use this: in-flight downloads are cancelled on the
+    downloader side too, otherwise the abandoned attempt keeps running and can
+    mark the want acquired later. Returns None when the want does not exist.
+    """
+    row = conn.execute("SELECT status FROM wants WHERE id=?", (want_id,)).fetchone()
+    if row is None:
+        return None
+    if row["status"] == WantStatus.ACQUIRED.value:
+        raise ValueError("want already acquired; re-open it first")
+
+    stamp = iso(now)
+    for task in conn.execute(
+        """
+        SELECT downloader, external_id FROM tasks
+        WHERE status='DOWNLOADING'
+          AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
+        """,
+        (want_id,),
+    ).fetchall():
+        if cancel is not None and task["external_id"]:
+            cancel(task["downloader"], task["external_id"])
+    conn.execute(
+        """
+        UPDATE tasks SET status='IGNORED', updated_at=?
+        WHERE status IN ('QUEUED','DOWNLOADING','FAILED','FAILED_RETRYABLE')
+          AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
+        """,
+        (stamp, want_id),
+    )
+    conn.execute("UPDATE wants SET status='WANTED', updated_at=? WHERE id=?",
+                 (stamp, want_id))
+    conn.commit()
+    return advance_want(conn, want_id, downloader_for, now)
+
+
 def generate_all(
     conn: sqlite3.Connection, downloader_for: DownloaderFor, now: datetime
 ) -> list[tuple[int, str]]:

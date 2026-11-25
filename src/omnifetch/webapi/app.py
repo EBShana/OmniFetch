@@ -203,43 +203,13 @@ def create_api_router(settings: Settings, ctx) -> APIRouter:
     @router.post("/wants/{want_id}/retry-next", dependencies=[Depends(auth)])
     def retry_next(want_id: int) -> dict:
         with db.session(settings.db_path) as conn:
-            row = conn.execute("SELECT status FROM wants WHERE id=?", (want_id,)).fetchone()
-            if row is None:
-                raise HTTPException(404, "want not found")
-            if row["status"] == "ACQUIRED":
+            try:
+                outcome = taskgen.retry_next(conn, want_id, ctx.downloader_for,
+                                             ctx.cancel_download, utcnow())
+            except ValueError:
                 raise HTTPException(409, "want already acquired; re-open it first")
-            now = utcnow()
-            # In-flight downloads must also be stopped on the tool side, or the
-            # abandoned attempt keeps downloading in the background.
-            for row in conn.execute(
-                """
-                SELECT downloader, external_id FROM tasks
-                WHERE status='DOWNLOADING'
-                  AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
-                """,
-                (want_id,),
-            ).fetchall():
-                downloader = ctx.downloaders.get(row["downloader"])
-                if downloader is not None and row["external_id"]:
-                    try:
-                        downloader.cancel(row["external_id"])
-                    except Exception:
-                        log.warning("retry-next: cancel failed for %s",
-                                    row["external_id"], exc_info=True)
-            conn.execute(
-                """
-                UPDATE tasks SET status='IGNORED', updated_at=?
-                WHERE status IN ('QUEUED', 'DOWNLOADING', 'FAILED', 'FAILED_RETRYABLE')
-                  AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
-                """,
-                (now.isoformat(), want_id),
-            )
-            conn.execute(
-                "UPDATE wants SET status='WANTED', updated_at=? WHERE id=?",
-                (now.isoformat(), want_id),
-            )
-            conn.commit()
-            outcome = taskgen.advance_want(conn, want_id, ctx.downloader_for, now)
+            if outcome is None:
+                raise HTTPException(404, "want not found")
         return {"ok": True, "outcome": outcome}
 
     @router.post("/wants/{want_id}/reopen", dependencies=[Depends(auth)])

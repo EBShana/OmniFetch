@@ -118,6 +118,16 @@ class Context:
             if thread.is_alive():
                 thread.join(remaining)
 
+    def cancel_download(self, downloader: str, external_id: str) -> None:
+        """Best-effort stop of a downloader-side task (used by retry-next)."""
+        instance = self.downloaders.get(downloader)
+        if instance is None or not external_id:
+            return
+        try:
+            instance.cancel(external_id)
+        except Exception:
+            log.warning("cancel failed for %s", external_id, exc_info=True)
+
     # ------------------------------------------------------- live reload
     def reload_source(self, name: str) -> str:
         """Rebuild one crawler from its (possibly edited) config file.

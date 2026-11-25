@@ -10,7 +10,7 @@ from omnifetch.config import Settings
 from omnifetch.core import ingest, matcher, statemachine, taskgen
 from omnifetch.core.db import connect, fetch_task, fetch_want, fetch_want_by_key, init_db
 from omnifetch.core.matcher import find_or_create_want
-from omnifetch.core.models import ErrorKind, Resource, ResourceType, WantStatus
+from omnifetch.core.models import ErrorKind, Resource, ResourceType, TaskStatus, WantStatus
 from omnifetch.core.statemachine import FailOutcome, RetryPolicy
 from omnifetch.core.util import iso, utcnow
 from omnifetch.scheduler import runner, trigger
@@ -225,6 +225,31 @@ def test_no_downloader_falls_through_to_next_candidate(conn):
     task = conn.execute("SELECT resource_id FROM tasks").fetchone()
     assert task["resource_id"] == low.id
     assert fetch_want(conn, want_id).status == WantStatus.WANTED
+
+
+def test_retry_next_cancels_in_flight_download_and_moves_on(conn):
+    good, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/1080", "Work 1080p", size=1000))
+    fallback, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/720", "Work 720p", size=500))
+    want_id = attach(conn, good)
+    conn.execute("UPDATE resources SET want_id=? WHERE id=?", (want_id, fallback.id))
+    conn.commit()
+    now = utcnow()
+
+    taskgen.advance_want(conn, want_id, DL, now)
+    task = statemachine.claim_task(conn, now)
+    statemachine.begin_download(conn, task.id, "ext-1", now)
+
+    cancelled: list[tuple[str, str]] = []
+    outcome = taskgen.retry_next(conn, want_id, DL,
+                                 lambda dl, ext: cancelled.append((dl, ext)), now)
+
+    assert cancelled == [("test-dl", "ext-1")]      # tool-side task stopped
+    assert fetch_task(conn, task.id).status == TaskStatus.IGNORED
+    assert outcome == "NEW_TASK"
+    queued = conn.execute("SELECT resource_id FROM tasks WHERE status='QUEUED'").fetchone()
+    assert queued["resource_id"] == fallback.id
 
 
 def test_no_downloader_keeps_want_waiting(conn):

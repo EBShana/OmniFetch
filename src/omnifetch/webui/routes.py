@@ -340,24 +340,13 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
     @router.post("/ui/wants/{want_id}/retry-next", dependencies=[Depends(auth)])
     def ui_retry_next(want_id: int, view: str = Form("")):
         with db.session(settings.db_path) as conn:
-            row = conn.execute("SELECT status FROM wants WHERE id=?", (want_id,)).fetchone()
-            if row is None:
-                raise HTTPException(404, "want not found")
-            if row["status"] == "ACQUIRED":
+            try:
+                outcome = taskgen.retry_next(conn, want_id, ctx.downloader_for,
+                                             ctx.cancel_download, utcnow())
+            except ValueError:
                 raise HTTPException(409, "作品已获得，请先重新打开")
-            now = utcnow()
-            conn.execute(
-                """
-                UPDATE tasks SET status='IGNORED', updated_at=?
-                WHERE status IN ('FAILED','FAILED_RETRYABLE','QUEUED')
-                  AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
-                """,
-                (now.isoformat(), want_id),
-            )
-            conn.execute("UPDATE wants SET status='WANTED', updated_at=? WHERE id=?",
-                         (now.isoformat(), want_id))
-            conn.commit()
-            outcome = taskgen.advance_want(conn, want_id, ctx.downloader_for, now)
+            if outcome is None:
+                raise HTTPException(404, "want not found")
             messages = {"NEW_TASK": "已切换到下一个候选", "GIVE_UP": "没有可用候选了",
                         "NO_DOWNLOADER": "没有可用下载器"}
             html = _failures_html(conn) if view == "failures" else _wants_rows(conn)
