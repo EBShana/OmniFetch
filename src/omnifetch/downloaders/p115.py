@@ -17,7 +17,11 @@ Config keys (downloaders.d/*.toml):
   proxy          可选；仅用于抓取 .torrent 文件解析 infohash，115 本身直连
   submit_grace_seconds  新任务在列表里出现前的宽限期，默认 90 秒
   snapshot_ttl   任务列表快照的复用时长（秒），默认 10
+  restart_window_seconds  115 标记 retry 的任务重启后的观察窗口，默认 300 秒
   user_agent     可选（当前未生效，见开发清单）
+
+注意：115 的“重启失败任务”接口（ac=restart_task）没有公开文档，参数按
+del_task 的形态推测，标注为“待真机实测”；不能真机验证前不要当成已可用。
 
 external_id 约定：`hash:<btih>`（磁链/种子，或 115 添加任务时返回了 info_hash
 的链接）或 `url:<uri>`（115 没返回 hash 的 http/ftp/ed2k），任务列表按
@@ -255,6 +259,17 @@ class P115Api:
         except DownloadError as exc:
             log.info("115 delete task best-effort failed: %s", exc)
 
+    def restart_task(self, info_hash: str) -> dict:
+        """重启 115 标记为可重试的离线任务。
+
+        ⚠️ 待真机实测：115 没有公开此接口的文档，`ac=restart_task` 与
+        `hash` 参数是按 del_task 的形态推测的，尚未用真实账号验证。
+        """
+        sign, ts = self._sign_token()
+        data = self._request("POST", _CLOUD, params={"ac": "restart_task"},
+                             data={"hash": info_hash, "sign": sign, "time": ts})
+        return self._check(data, "重启任务")
+
 
 def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
                  timeout: int = 180) -> None:
@@ -314,7 +329,8 @@ class P115Downloader(DownloaderPlugin):
                ResourceType.NETDISK)
     DEFAULT_CONFIG = {"cookie_file": "data/p115_cookies.json",
                       "target_dir_id": "0", "savepath": "", "proxy": "",
-                      "submit_grace_seconds": 90, "snapshot_ttl": 10}
+                      "submit_grace_seconds": 90, "snapshot_ttl": 10,
+                      "restart_window_seconds": 300}
 
     def __init__(self, name: str, config: dict):
         super().__init__(name, config)
@@ -325,6 +341,8 @@ class P115Downloader(DownloaderPlugin):
         self._api: P115Api | None = None
         self._grace = float(config.get("submit_grace_seconds", 90) or 0)
         self._submitted: dict[str, float] = {}  # external_id -> 提交时刻
+        self._restart_window = float(config.get("restart_window_seconds", 300) or 0)
+        self._restarts: dict[str, float] = {}  # external_id -> 最近重启时刻
         self._max_scan_pages = _MAX_SCAN_PAGES
         self._snapshot_tasks: list[dict] | None = None
         self._snapshot_complete = True
@@ -411,6 +429,37 @@ class P115Downloader(DownloaderPlugin):
         submitted_at = self._submitted.get(key)
         return submitted_at is not None and self._now() - submitted_at <= self._grace
 
+    # --------------------------------------------------------------- retry
+
+    def _in_restart_window(self, external_id: str) -> bool:
+        """观察窗口内只等不重启；窗口过了仍失败则交给调用方降级。"""
+        started_at = self._restarts.get(external_id)
+        if started_at is None:
+            return False
+        if self._now() - started_at > self._restart_window:
+            del self._restarts[external_id]
+            return False
+        return True
+
+    def _request_restart(self, external_id: str, task: dict) -> bool:
+        """按 115 的 retry 动作重启任务；返回 False 时调用方降级永久失败。"""
+        info_hash = (task.get("info_hash") or "").lower()
+        if not info_hash and external_id.startswith("hash:"):
+            info_hash = external_id.partition(":")[2]
+        if not info_hash:
+            log.warning("115 任务 %s 标记可重试但拿不到 info_hash，无法重启",
+                        external_id)
+            return False
+        try:
+            # 接口名与参数无公开文档，待真机实测（见 P115Api.restart_task）
+            self._get_api().restart_task(info_hash)
+        except DownloadError as exc:
+            log.warning("115 任务 %s 重启失败：%s", external_id, exc)
+            return False
+        self._restarts[external_id] = self._now()
+        log.info("115 任务 %s 已请求重启，继续跟踪", external_id)
+        return True
+
     def _fetch_torrent(self, url: str) -> bytes:
         try:
             resp = httpx.get(url, proxy=self._proxy, timeout=60,
@@ -496,17 +545,29 @@ class P115Downloader(DownloaderPlugin):
             if self._in_submit_grace(external_id):
                 # 刚提交的任务可能还没出现在 115 的任务列表里
                 return TaskResult(PollStatus.PROGRESS, queued=True)
+            self._restarts.pop(external_id, None)
             return TaskResult(PollStatus.FAILED, error_kind=ErrorKind.PERMANENT,
                               error_message="115 离线任务不存在（可能已过期或被删除）")
         self._submitted.pop(external_id, None)
         fail_msg = task.get("fail_msg") or ""
         actions = task.get("available_actions") or []
         if fail_msg or "retry" in actions:
+            if "retry" in actions and external_id not in self._restarts:
+                if self._request_restart(external_id, task):
+                    return TaskResult(PollStatus.PROGRESS, queued=True)
+            elif "retry" in actions and self._in_restart_window(external_id):
+                # 刚重启过还没见效：不重复重启，也不急着判死
+                return TaskResult(PollStatus.PROGRESS, queued=True)
+            # 重启失败，或重启过一轮窗口过了仍然失败：降级永久失败
+            self._restarts.pop(external_id, None)
             return TaskResult(PollStatus.FAILED, error_kind=ErrorKind.PERMANENT,
                               error_message=f"115 离线任务失败：{fail_msg or '标记为可重试'}")
         percent = float(task.get("percent") or 0)
         if int(task.get("status") or 0) == 1 or percent >= 100:
+            self._restarts.pop(external_id, None)
             return TaskResult(PollStatus.DONE, progress=1.0)
+        if percent > 0:
+            self._restarts.pop(external_id, None)  # 已经重新跑起来，清掉重启记录
         # percent 为 0 = 云端还没开始拉取（排队），这期间不计停滞
         return TaskResult(PollStatus.PROGRESS, progress=min(percent, 99.9) / 100,
                           queued=percent <= 0)
