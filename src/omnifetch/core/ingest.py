@@ -136,3 +136,47 @@ def ingest_resources(conn: sqlite3.Connection, resources: list[Resource]) -> Ing
         else:
             result.duplicates += 1
     return result
+
+
+def ensure_wants(conn: sqlite3.Connection, resources: list[Resource]) -> int:
+    """Auto subscription: one want per ``want_key`` (VCB: one sheet row).
+
+    Crawlers that emit ``want_key`` + ``want_title`` get a want created the
+    first time their row is seen, and every mirror of that row becomes a
+    candidate. Runs after ingest, so it also covers rows whose resources
+    deduplicated into an existing candidate: those still get their own want.
+    Returns the number of wants created.
+    """
+    groups: dict[str, list[Resource]] = {}
+    for resource in resources:
+        extra = resource.extra or {}
+        if extra.get("want_key") and extra.get("want_title") is not None:
+            groups.setdefault(str(extra["want_key"]), []).append(resource)
+
+    created = 0
+    for want_key, group in groups.items():
+        rows = []
+        for resource in group:
+            fingerprint = compute_fingerprint(resource.source_url)
+            row = conn.execute(
+                "SELECT id, want_id FROM resources WHERE fingerprint=?", (fingerprint,)
+            ).fetchone()
+            # A resource already owned by another want is a duplicate release
+            # across sheet rows: never steal it, so no duplicate download.
+            if row and row["want_id"] is None:
+                rows.append(row["id"])
+        if not rows:
+            continue
+        hit = conn.execute("SELECT id FROM wants WHERE work_key=?", (want_key,)).fetchone()
+        if hit:
+            want_id = hit["id"]
+        else:
+            title = str(group[0].extra.get("want_title") or want_key)
+            want_id = matcher.find_or_create_want(conn, want_key, title).id
+            created += 1
+        conn.executemany(
+            "UPDATE resources SET want_id=? WHERE id=? AND want_id IS NULL",
+            [(want_id, row_id) for row_id in rows],
+        )
+        conn.commit()
+    return created

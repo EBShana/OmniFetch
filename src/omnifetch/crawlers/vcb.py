@@ -140,6 +140,10 @@ class VcbCrawler(CrawlerPlugin):
 
     def _expand_row(self, row: dict, page_html: str, proxy: str | None) -> list[Resource]:
         title = row["title"] or _page_title(page_html) or row["link"]
+        # One sheet row == one download. The want_key/want_title pair lets the
+        # core create the want on first sight of a row and attach both mirrors
+        # to it, so a later crawl of the same row adds nothing.
+        want_key = f"vcb-{row['uid']}"
         resources = []
         for site, page_url in _extract_mirrors(page_html):
             uris, rtype = self._resolve_mirror(site, page_url, proxy)
@@ -152,7 +156,12 @@ class VcbCrawler(CrawlerPlugin):
                     source=f"vcb-{site}",
                     download_uris=uris,
                     resource_type=rtype,
-                    extra={"vcb_uid": row["uid"], "vcb_info": row["info"]},
+                    extra={
+                        "vcb_uid": row["uid"],
+                        "vcb_info": row["info"],
+                        "want_key": want_key,
+                        "want_title": title,
+                    },
                 )
             )
         if not resources:

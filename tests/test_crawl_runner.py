@@ -176,6 +176,53 @@ def test_process_interrupted_run_resumes_immediately(tmp_path):
     conn.close()
 
 
+def test_crawl_creates_one_want_per_new_row_and_skips_old_rows(tmp_path):
+    """VCB: every new sheet row becomes one want + one download; re-crawling
+    the same rows must not add anything."""
+
+    def row(uid: str) -> list[Resource]:
+        title = f"Sheet Work {uid}"
+        extra = {"vcb_uid": uid, "want_key": f"vcb-{uid}", "want_title": title}
+        return [
+            Resource(title=title, source_url=f"https://share.dmhy.org/topics/view/{uid}_x.html",
+                     source="vcb-dmhy", download_uris=[f"magnet:?xt=urn:btih:{uid}"],
+                     resource_type=ResourceType.MAGNET, extra=dict(extra)),
+            Resource(title=title, source_url=f"https://nyaa.si/view/{uid}",
+                     source="vcb-nyaa", download_uris=[f"https://nyaa.si/download/{uid}.torrent"],
+                     resource_type=ResourceType.TORRENT, extra=dict(extra)),
+        ]
+
+    class _SheetCrawler(CrawlerPlugin):
+        def __init__(self):
+            super().__init__("sheet", {"interval": 86400})
+
+        def fetch(self):
+            return row("1001") + row("1002")
+
+        def fetch_batches(self):
+            yield CrawlBatch(self.fetch(), done=2, total=2)
+
+    conn = connect(str(tmp_path / "crawl.db"))
+    init_db(conn)
+    crawler = _SheetCrawler()
+    ctx = runner.Context(
+        Settings(db_path=str(tmp_path / "crawl.db"), config_dir=str(tmp_path / "cfg")),
+        {"sheet": crawler}, {}, [],
+    )
+
+    trigger.run_crawler(ctx, "sheet", crawler, utcnow())
+    assert conn.execute("SELECT COUNT(*) FROM wants").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM resources").fetchone()[0] == 4
+    assert conn.execute("SELECT COUNT(*) FROM resources WHERE want_id IS NULL"
+                        ).fetchone()[0] == 0
+
+    # Same table again: both rows are duplicates, so no new wants/downloads.
+    trigger.run_crawler(ctx, "sheet", crawler, utcnow())
+    assert conn.execute("SELECT COUNT(*) FROM wants").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM resources").fetchone()[0] == 4
+    conn.close()
+
+
 def test_successful_run_keeps_full_interval(tmp_path):
     conn = connect(str(tmp_path / "crawl.db"))
     init_db(conn)

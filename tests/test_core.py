@@ -274,6 +274,109 @@ def test_manual_retry_revives_given_up_want(conn):
     assert fetch_task(conn, task.id).status.value == "QUEUED"
 
 
+# ------------------------------------------------- VCB auto-want per row
+
+def vcb_resource(url: str, title: str, uid: str) -> Resource:
+    return Resource(
+        title=title,
+        source_url=url,
+        source="vcb-dmhy",
+        download_uris=[f"magnet:?xt=urn:btih:{uid}"],
+        resource_type=ResourceType.MAGNET,
+        extra={"vcb_uid": uid, "want_key": f"vcb-{uid}", "want_title": title},
+    )
+
+
+def want_id_of(conn, resource: Resource) -> int | None:
+    return conn.execute(
+        "SELECT want_id FROM resources WHERE id=?", (resource.id,)
+    ).fetchone()["want_id"]
+
+
+def test_new_sheet_row_creates_one_want_for_all_mirrors(conn):
+    title = "Guild no Uketsukejou Desu ga\n虽然是公会的柜台小姐"
+    dmhy = vcb_resource("https://share.dmhy.org/topics/view/1_x.html", title, "261102")
+    stored, created = ingest.ingest_resource(conn, dmhy)
+    assert created
+    assert ingest.ensure_wants(conn, [dmhy]) == 1
+
+    want = fetch_want_by_key(conn, "vcb-261102")
+    assert want is not None
+    assert want.display_title == title
+    assert want.status == WantStatus.WANTED
+    assert want_id_of(conn, stored) == want.id
+
+    nyaa = Resource(
+        title=title, source_url="https://nyaa.si/view/2184807", source="vcb-nyaa",
+        download_uris=["https://nyaa.si/download/2184807.torrent"],
+        resource_type=ResourceType.TORRENT,
+        extra={"vcb_uid": "261102", "want_key": "vcb-261102", "want_title": title},
+    )
+    mirror, _ = ingest.ingest_resource(conn, nyaa)
+    assert want_id_of(conn, mirror) == want.id
+    assert ingest.ensure_wants(conn, [nyaa]) == 0
+    assert conn.execute("SELECT COUNT(*) FROM wants").fetchone()[0] == 1
+
+    # The normal dispatch chain picks the row up without any manual step.
+    assert taskgen.advance_want(conn, want.id, DL, utcnow()) == "NEW_TASK"
+
+
+def test_recrawled_sheet_row_does_not_create_a_second_want(conn):
+    url = "https://share.dmhy.org/topics/view/2_x.html"
+    title = "Mayonaka Heart Tune\n午夜的倾心旋律"
+    first = vcb_resource(url, title, "261101")
+    _, created = ingest.ingest_resource(conn, first)
+    assert created
+    ingest.ensure_wants(conn, [first])
+
+    again_res = vcb_resource(url, title, "261101")
+    again, created_again = ingest.ingest_resource(conn, again_res)
+    assert not created_again
+    assert ingest.ensure_wants(conn, [again_res]) == 0
+    assert conn.execute("SELECT COUNT(*) FROM wants").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM resources").fetchone()[0] == 1
+    assert again.want_id == fetch_want_by_key(conn, "vcb-261101").id
+
+
+def test_collapsed_duplicate_row_does_not_add_another_want(conn):
+    # Same release posted twice on the sheet (title+size identical): the
+    # second row merges into the existing candidate and must not create a
+    # second want, otherwise the same release would be downloaded twice.
+    first = vcb_resource("https://share.dmhy.org/topics/view/3_a.html",
+                         "Same Release 1080p", "300001")
+    second = vcb_resource("https://share.dmhy.org/topics/view/3_b.html",
+                          "Same Release 1080p", "300002")
+    first.extra["size"] = second.extra["size"] = 1000
+
+    _, created1 = ingest.ingest_resource(conn, first)
+    assert created1
+    ingest.ensure_wants(conn, [first])
+    _, created2 = ingest.ingest_resource(conn, second)
+    assert not created2
+    assert ingest.ensure_wants(conn, [second]) == 0
+    assert conn.execute("SELECT COUNT(*) FROM wants").fetchone()[0] == 1
+    assert fetch_want_by_key(conn, "vcb-300002") is None
+
+
+def test_row_ingested_before_feature_gets_its_want_on_next_crawl(conn):
+    # The current DB already holds VCB rows ingested before auto-want existed.
+    # Their next crawl is a duplicate resource, but the want must still appear.
+    url = "https://share.dmhy.org/topics/view/4_x.html"
+    title = "Old Row\n旧条目"
+    stored, created = ingest.ingest_resource(conn, vcb_resource(url, title, "400001"))
+    assert created
+    assert conn.execute("SELECT COUNT(*) FROM wants").fetchone()[0] == 0
+
+    fresh = vcb_resource(url, title, "400001")
+    _, created_again = ingest.ingest_resource(conn, fresh)
+    assert not created_again
+    assert ingest.ensure_wants(conn, [fresh]) == 1
+
+    want = fetch_want_by_key(conn, "vcb-400001")
+    assert want_id_of(conn, stored) == want.id
+    assert taskgen.advance_want(conn, want.id, DL, utcnow()) == "NEW_TASK"
+
+
 # ------------------------------------------------------- crawl scheduling
 
 class _RecordingCrawler:

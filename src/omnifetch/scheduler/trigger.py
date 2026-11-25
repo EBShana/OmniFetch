@@ -60,6 +60,9 @@ def run_crawler(ctx: "Context", name: str, crawler, now: datetime) -> None:
         for batch in crawler.fetch_batches():
             resources = list(batch.resources)
             result = ingest.ingest_resources(conn, resources)
+            # New sheet rows become their own want and enter normal dispatch;
+            # re-crawled rows resolve to the existing want and add nothing.
+            ingest.ensure_wants(conn, resources)
             fetched += len(resources)
             created += result.created
             duplicates += result.duplicates

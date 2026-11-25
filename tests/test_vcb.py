@@ -113,6 +113,20 @@ def test_fetch_emits_one_resource_per_resolvable_mirror(crawler, monkeypatch):
     assert nyaa.extra["vcb_uid"] in {"261102", "261101"}
 
 
+def test_resources_carry_one_auto_want_per_sheet_row(crawler, monkeypatch):
+    # One sheet row == one download: both mirrors of a row share a stable
+    # want_key so the core creates a single want for the row.
+    monkeypatch.setattr(crawler, "_make_backend", lambda: FakeBackend(VCB_PAGE))
+    monkeypatch.setattr(vcb, "_http_get", lambda url, proxy, **kw: DMHY_PAGE)
+    results = crawler.fetch()
+
+    per_uid: dict[str, set[str]] = {}
+    for res in results:
+        per_uid.setdefault(res.extra["vcb_uid"], set()).add(res.extra["want_key"])
+        assert res.extra["want_title"] == res.title
+    assert per_uid == {"261102": {"vcb-261102"}, "261101": {"vcb-261101"}}
+
+
 def test_total_rows_reported_before_first_page(crawler, monkeypatch):
     monkeypatch.setattr(crawler, "_make_backend", lambda: FakeBackend(VCB_PAGE))
     monkeypatch.setattr(vcb, "_http_get", lambda url, proxy, **kw: DMHY_PAGE)
