@@ -113,6 +113,14 @@ def test_fetch_emits_one_resource_per_resolvable_mirror(crawler, monkeypatch):
     assert nyaa.extra["vcb_uid"] in {"261102", "261101"}
 
 
+def test_total_rows_reported_before_first_page(crawler, monkeypatch):
+    monkeypatch.setattr(crawler, "_make_backend", lambda: FakeBackend(VCB_PAGE))
+    monkeypatch.setattr(vcb, "_http_get", lambda url, proxy, **kw: DMHY_PAGE)
+    batches = list(crawler.fetch_batches())
+    assert batches[0].resources == []
+    assert batches[0].done == 0 and batches[0].total == 2
+
+
 def test_all_pages_failed_raises_instead_of_empty_success(crawler, monkeypatch):
     # CF block / dead cookie: every page returns non-200. A silent [] would be
     # recorded as a successful run and silence the source for its interval.

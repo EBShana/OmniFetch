@@ -67,6 +67,10 @@ class VcbCrawler(CrawlerPlugin):
         if max_pages > 0:
             rows = rows[:max_pages]
         total = len(rows)
+        if total:
+            # Report the row count immediately so the UI shows "0/1103"
+            # instead of "0/?" until the first batch completes.
+            yield CrawlBatch([], 0, total)
         backend = self._make_backend()
         pending: list[Resource] = []
         done = 0
