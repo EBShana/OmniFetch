@@ -6,13 +6,15 @@ actions enforce the token — the shell pops a token prompt on the first
 """
 from __future__ import annotations
 
+import hmac
 import json
 import sqlite3
+import time
 from datetime import timedelta
 from importlib.resources import files
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ..config import (
@@ -27,12 +29,15 @@ from ..config import (
 )
 from ..core import db, statemachine, taskgen
 from ..core.matcher import create_want as _create_want
+from ..core.security import verify_password
 from ..core.util import parse_iso, utcnow
 from ..crawlers import crawler_types
 from ..crawlers import default_config as crawler_default_config
 from ..downloaders import default_config as downloader_default_config
 from ..downloaders import downloader_types
 from ..webapi.app import check_token, get_candidates
+from .auth import (SESSION_COOKIE, SESSION_TTL, LoginThrottle, create_session,
+                   session_secret, verify_session)
 
 templates = Jinja2Templates(directory=str(files("omnifetch.webui") / "templates"))
 
@@ -109,6 +114,7 @@ def _toast(html: str, message: str) -> Response:
 
 def create_ui_router(settings: Settings, ctx) -> APIRouter:
     router = APIRouter()
+    throttle = LoginThrottle()
 
     def auth(request: Request) -> None:
         check_token(request, settings)
@@ -116,9 +122,70 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
     def render(name: str, **kw) -> str:
         return templates.get_template(name).render(**kw)
 
+    def _safe_next(value: str) -> str:
+        return value if value.startswith("/") and not value.startswith("//") else "/"
+
+    def _client_key(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    def _login_page(request: Request, *, error: str = "", username: str = "",
+                    next_path: str = "/", locked: bool = False, status_code: int = 200):
+        return templates.TemplateResponse(request, "login.html", {
+            "error": error, "username": username or settings.ui_username,
+            "next": _safe_next(next_path), "locked": locked,
+        }, status_code=status_code)
+
+    # ---------------------------------------------------------- login
+    @router.get("/login", response_class=HTMLResponse)
+    def login_page(request: Request, next: str = ""):
+        if not settings.ui_password_hash:
+            return RedirectResponse("/", status_code=303)
+        secret = session_secret(settings.ui_password_hash)
+        if verify_session(secret, request.cookies.get(SESSION_COOKIE), utcnow()):
+            return RedirectResponse("/", status_code=303)
+        return _login_page(request, next_path=next)
+
+    @router.post("/login", response_class=HTMLResponse)
+    def login_submit(request: Request, username: str = Form(""),
+                     password: str = Form(""), next: str = Form("/")):
+        if not settings.ui_password_hash:
+            return RedirectResponse("/", status_code=303)
+        key = _client_key(request)
+        now = utcnow()
+        if throttle.blocked(key, now):
+            return _login_page(request, error="尝试次数过多，请 5 分钟后再试",
+                               username=username, next_path=next, locked=True,
+                               status_code=429)
+        ok = (hmac.compare_digest(username, settings.ui_username)
+              and verify_password(password, settings.ui_password_hash))
+        if not ok:
+            throttle.record_failure(key, now)
+            time.sleep(throttle.delay)      # also slows scripted guessing
+            return _login_page(request, error="用户名或密码不正确",
+                               username=username, next_path=next, status_code=401)
+        throttle.reset(key)
+        response = RedirectResponse(_safe_next(next), status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE,
+            create_session(session_secret(settings.ui_password_hash),
+                           settings.ui_username, now),
+            max_age=int(SESSION_TTL.total_seconds()), httponly=True,
+            samesite="lax", path="/", secure=request.url.scheme == "https",
+        )
+        return response
+
+    @router.post("/logout")
+    def logout():
+        response = RedirectResponse("/login" if settings.ui_password_hash else "/",
+                                    status_code=303)
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return response
+
     # ---------------------------------------------------------- pages
     def page(request: Request, name: str, page_id: str, **kw):
-        return templates.TemplateResponse(request, name, {"page": page_id, **kw})
+        return templates.TemplateResponse(request, name, {
+            "page": page_id, "ui_auth": bool(settings.ui_password_hash), **kw,
+        })
 
     @router.get("/", response_class=HTMLResponse)
     def page_dashboard(request: Request):

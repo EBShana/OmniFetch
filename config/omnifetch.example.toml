@@ -7,6 +7,11 @@ max_dispatch_per_tick = 10
 max_active_downloads = 3
 webhook_url = ""
 token = ""
+# Web UI 登录（对外网/NAS 访问建议开启；留空 ui_password_hash 则不启用登录）
+# 生成哈希：omnifetch hash-password  （交互输入，磁盘上只存 scrypt 哈希）
+# 也可用环境变量 OMNIFETCH_UI_PASSWORD_HASH，或 OMNIFETCH_UI_PASSWORD（启动时在内存中哈希）
+ui_username = "admin"
+ui_password_hash = ""
 retry_max_retries = 5
 retry_base_seconds = 60
 retry_max_seconds = 7200

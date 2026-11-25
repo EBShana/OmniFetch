@@ -17,6 +17,11 @@
   <a href="/failures" class="{{ 'active' if page == 'failures' }}">失败队列</a>
   <a href="/status" class="{{ 'active' if page == 'status' }}">系统状态</a>
   <a href="/settings" class="{{ 'active' if page == 'settings' }}">设置</a>
+  {% if ui_auth %}
+  <form method="post" action="/logout" class="logout">
+    <button type="submit">退出登录</button>
+  </form>
+  {% endif %}
 </nav>
 <main class="container">
 {% block content %}{% endblock %}

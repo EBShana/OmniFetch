@@ -1,4 +1,4 @@
-"""CLI entry point: init-db | run [--once] | serve."""
+"""CLI entry point: init-db | run [--once] | serve | 115-login | hash-password."""
 from __future__ import annotations
 
 import argparse
@@ -31,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p115 = sub.add_parser("115-login", help="扫码登录 115 网盘（下载器实例需 type=p115）")
     p115.add_argument("name", help="downloaders.d 中的实例名")
+
+    sub.add_parser(
+        "hash-password",
+        help="交互式生成 Web UI 登录密码哈希（写入 config/omnifetch.toml）",
+    )
     return parser
 
 
@@ -90,6 +95,23 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             stop_event.set()
             ctx.stop_crawlers()
+
+    if args.command == "hash-password":
+        import getpass
+
+        from .core.security import hash_password
+
+        password = getpass.getpass("Web UI 登录密码: ")
+        if not password:
+            print("错误：密码不能为空")
+            return 1
+        if getpass.getpass("再输入一次确认: ") != password:
+            print("错误：两次输入不一致")
+            return 1
+        print(hash_password(password))
+        print("\n把上面这行哈希填入 config/omnifetch.toml 的 ui_password_hash，"
+              "\n或设为环境变量 OMNIFETCH_UI_PASSWORD_HASH（仅存哈希，不存明文）。")
+        return 0
 
     if args.command == "115-login":
         from .config import load_plugin_configs

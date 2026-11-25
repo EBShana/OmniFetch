@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · OmniFetch</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+<main class="login-card">
+  <h1>Omni<b>Fetch</b></h1>
+  <p class="muted">请登录后继续</p>
+  {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label>用户名
+      <input name="username" value="{{ username }}" autocomplete="username" required autofocus>
+    </label>
+    <label>密码
+      <input name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button class="btn primary" type="submit"{% if locked %} disabled{% endif %}>登录</button>
+  </form>
+</main>
+</body>
+</html>

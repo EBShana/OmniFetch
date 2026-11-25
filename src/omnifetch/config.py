@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
+from .core.security import hash_password
 from .core.statemachine import RetryPolicy
 
 ENV_PREFIX = "OMNIFETCH_"
@@ -35,6 +36,8 @@ class Settings:
     dispatch_daily_limit: int = 50        # max tasks submitted per day, 0 = unlimited
     webhook_url: str = ""                 # set to enable webhook notifications
     token: str = ""                       # set to require auth on API/UI data
+    ui_username: str = "admin"            # Web UI login user
+    ui_password_hash: str = ""            # scrypt hash; empty = UI login disabled
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
 
@@ -56,6 +59,10 @@ def _apply_core_dict(settings: Settings, data: dict) -> None:
         settings.webhook_url = str(data["webhook_url"])
     if "token" in data:
         settings.token = str(data["token"])
+    if "ui_username" in data:
+        settings.ui_username = str(data["ui_username"])
+    if "ui_password_hash" in data:
+        settings.ui_password_hash = str(data["ui_password_hash"])
     if "retry_max_retries" in data:
         settings.retry.max_retries = int(data["retry_max_retries"])
     if "retry_base_seconds" in data:
@@ -109,7 +116,14 @@ def dump_toml(data: dict) -> str:
 def save_core_settings(config_dir: str, data: dict) -> None:
     path = Path(config_dir) / CORE_TOML
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(dump_toml(data), encoding="utf-8")
+    merged = dict(data)
+    if path.is_file():
+        # Keep keys the settings form does not expose (e.g. ui_password_hash)
+        # instead of wiping them on the next save.
+        with path.open("rb") as fh:
+            for key, value in tomllib.load(fh).items():
+                merged.setdefault(key, value)
+    path.write_text(dump_toml(merged), encoding="utf-8")
 
 
 _PLUGIN_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
@@ -167,6 +181,14 @@ def load_settings() -> Settings:
         settings.webhook_url = env("WEBHOOK")
     if env("TOKEN"):
         settings.token = env("TOKEN")
+    if env("UI_USERNAME"):
+        settings.ui_username = env("UI_USERNAME")
+    if env("UI_PASSWORD_HASH"):
+        settings.ui_password_hash = env("UI_PASSWORD_HASH")
+    elif env("UI_PASSWORD"):
+        # Convenience for Docker/NAS: the plaintext env var is hashed in
+        # memory at startup and never written to a config file.
+        settings.ui_password_hash = hash_password(env("UI_PASSWORD"))
     return settings
 
 

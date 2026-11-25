@@ -33,6 +33,8 @@
     // Any authenticated fragment that 401s -> ask for the token again.
     document.body.addEventListener('htmx:responseError', function (e) {
       if (e.detail.xhr && e.detail.xhr.status === 401) {
+        // The UI login guard sends us to /login instead.
+        if (e.detail.xhr.getResponseHeader('HX-Redirect')) return;
         localStorage.removeItem('omnifetch_token');
         document.cookie = 'omnifetch_token=; path=/; max-age=0; samesite=lax';
         openTokenModal();

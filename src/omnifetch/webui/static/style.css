@@ -15,6 +15,23 @@ body { margin: 0; background: var(--bg); color: var(--text);
   border-radius: 6px; }
 .topnav a:hover { color: var(--text); }
 .topnav a.active { color: var(--text); background: #212b42; }
+.topnav .logout { margin-left: auto; }
+.topnav .logout button { background: none; border: 1px solid var(--line);
+  color: var(--muted); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.topnav .logout button:hover { color: var(--text); }
+
+.login-body { min-height: 100vh; display: flex; align-items: center;
+  justify-content: center; }
+.login-card { width: min(360px, calc(100vw - 32px)); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 12px; padding: 26px 24px; }
+.login-card h1 { margin: 0 0 4px; font-size: 22px; }
+.login-card h1 b { color: var(--blue); }
+.login-card label { display: block; margin: 14px 0 0; color: var(--muted);
+  font-size: 13px; }
+.login-card input { width: 100%; margin-top: 6px; padding: 9px 10px;
+  border-radius: 7px; border: 1px solid var(--line); background: #101726;
+  color: var(--text); font: inherit; }
+.login-card button { width: 100%; margin-top: 18px; }
 .container { max-width: 1080px; margin: 20px auto; padding: 0 16px; }
 
 .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px;
