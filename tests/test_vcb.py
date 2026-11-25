@@ -218,16 +218,59 @@ def test_failure_counter_resets_after_a_successful_page(crawler, monkeypatch):
     assert resources                                  # completed, no CrawlError
 
 
-def test_empty_sheet_is_not_an_error(crawler, monkeypatch):
+def test_empty_sheet_is_reported_as_error(crawler, monkeypatch):
     monkeypatch.setattr(crawler, "_fetch_sheet", lambda proxy: [])
     monkeypatch.setattr(crawler, "_make_backend", lambda: FakeBackend(None))
-    assert crawler.fetch() == []
+    with pytest.raises(vcb.CrawlError, match="0 行"):
+        crawler.fetch()
+
+
+class _SheetClient:
+    def __init__(self, text: str):
+        self._text = text
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url):
+        return _FakeResponse(200, self._text)
+
+
+def test_html_200_response_is_rejected_as_invalid_csv(monkeypatch):
+    # Google sometimes answers 200 with a login/error HTML page; parsing that
+    # must not look like a valid empty sheet.
+    raw = vcb.VcbCrawler("vcb", {"sheet_id": "x"})
+    monkeypatch.setattr(vcb.httpx, "Client", lambda **kw: _SheetClient("<html>sign in</html>"))
+    with pytest.raises(vcb.CrawlError, match="表头"):
+        raw._fetch_sheet(None)
+
+
+def test_header_only_sheet_is_reported_as_error(monkeypatch):
+    raw = vcb.VcbCrawler("vcb", {"sheet_id": "x"})
+    header = '"UID","Romanji Title / 项目名","Info / 备注","Link / 链接",""\n'
+    monkeypatch.setattr(vcb.httpx, "Client", lambda **kw: _SheetClient(header))
+    with pytest.raises(vcb.CrawlError, match="0 行"):
+        raw._fetch_sheet(None)
+
+
+def test_valid_sheet_header_and_rows_still_parse(monkeypatch):
+    raw = vcb.VcbCrawler("vcb", {"sheet_id": "x"})
+    monkeypatch.setattr(vcb.httpx, "Client", lambda **kw: _SheetClient(SHEET_CSV))
+    rows = raw._fetch_sheet(None)
+    assert len(rows) == 2 and rows[0]["uid"] == "261102"
 
 
 class _FakeResponse:
-    def __init__(self, code: int):
+    def __init__(self, code: int, text: str = "page"):
         self.status_code = code
-        self.text = "page"
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 def _fake_client(sequence: list):

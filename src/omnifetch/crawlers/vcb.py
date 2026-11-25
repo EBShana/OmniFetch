@@ -66,6 +66,11 @@ class VcbCrawler(CrawlerPlugin):
         max_failures = max(1, int(self.config.get("max_consecutive_failures", 10)))
 
         rows = self._fetch_sheet(proxy)
+        if not rows:
+            # Defensive: a fetcher that bypasses _fetch_sheet validation must
+            # still not turn "no rows" into a successful empty run.
+            log.warning("VCB 表格 0 行数据（确认为空表），按错误上报")
+            raise CrawlError("VCB 表格 0 行数据（确认为空表）")
         if max_pages > 0:
             rows = rows[:max_pages]
         total = len(rows)
@@ -141,14 +146,28 @@ class VcbCrawler(CrawlerPlugin):
             response = client.get(url)
             response.raise_for_status()
         # Column order: UID, Title (multiline), Info, Link, (empty)
+        records = list(csv.reader(io.StringIO(response.text)))
+        if not records:
+            log.warning("VCB 表格响应为空（连表头都没有），按错误上报")
+            raise CrawlError("VCB 表格响应为空（0 行，含表头）")
+        header = [cell.strip() for cell in records[0]]
+        if len(header) < 4 or header[0] != "UID":
+            # A 200 HTML login/error page parses into arbitrary CSV-ish rows.
+            log.warning("VCB 表格表头异常：%r，响应可能不是 CSV", records[0][:3])
+            raise CrawlError("VCB 表格表头异常（缺少 UID 列），响应可能不是 CSV")
         rows = []
-        for record in csv.reader(io.StringIO(response.text)):
-            if len(record) < 4 or record[0] == "UID":
+        for record in records[1:]:
+            if len(record) < 4 or not record[0].strip():
                 continue
             rows.append(
                 {"uid": record[0].strip(), "title": record[1].strip(),
                  "info": record[2].strip(), "link": record[3].strip()}
             )
+        if not rows:
+            # Header is intact but there is no data: distinguishable from a
+            # broken response, still an error rather than "successfully 0".
+            log.warning("VCB 表格只有表头、0 行数据（确认为空表），按错误上报")
+            raise CrawlError("VCB 表格 0 行数据（确认为空表）")
         return rows
 
     # ------------------------------------------------- page expansion
