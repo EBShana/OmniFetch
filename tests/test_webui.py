@@ -42,6 +42,21 @@ def _seed_want(settings) -> int:
     return want.id
 
 
+def test_dashboard_shows_running_crawl_progress(env):
+    _, settings = env
+    conn = core_db.connect(settings.db_path)
+    conn.execute(
+        "INSERT INTO source_runs (source, started_at, done, total) VALUES ('vcb', ?, 3, 10)",
+        (iso(utcnow()),),
+    )
+    conn.commit()
+    conn.close()
+
+    html = TestClient(env[0]).get("/frag/dashboard").text
+    assert "抓取中" in html
+    assert "3/10" in html
+
+
 def test_pages_and_static_render(client):
     for path in ["/", "/wants", "/tasks", "/failures", "/status"]:
         response = client.get(path)

@@ -33,6 +33,8 @@ class Context:
     downloaders: dict  # name -> DownloaderPlugin
     notifiers: list[Notifier]
     last_runs: dict[str, datetime] = field(default_factory=dict)
+    _crawler_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _crawler_runs: dict = field(default_factory=dict, repr=False)
 
     def conn(self) -> sqlite3.Connection:
         return db.connect(self.settings.db_path)
@@ -54,6 +56,67 @@ class Context:
     def rebuild_notifiers(self) -> None:
         """Rebuild the notifier list after webhook_url changed at runtime."""
         self.notifiers = _build_notifiers(self.settings)
+
+    # --------------------------------------------------- crawler workers
+    def start_crawler(self, name: str, crawler, now: datetime) -> bool:
+        """Start one crawler in the background. Returns False if already up."""
+        with self._crawler_lock:
+            entry = self._crawler_runs.get(name)
+            if entry and entry[0].is_alive():
+                return False
+            self._crawler_runs.pop(name, None)
+            crawler.reset_stop()
+            thread = threading.Thread(
+                target=trigger.run_crawler, args=(self, name, crawler, now),
+                name=f"omnifetch-crawler-{name}", daemon=True,
+            )
+            self._crawler_runs[name] = (thread, crawler)
+            thread.start()
+            return True
+
+    def is_crawler_running(self, name: str) -> bool:
+        with self._crawler_lock:
+            entry = self._crawler_runs.get(name)
+            return bool(entry and entry[0].is_alive())
+
+    def finish_crawler(self, name: str) -> None:
+        current = threading.current_thread()
+        with self._crawler_lock:
+            entry = self._crawler_runs.get(name)
+            if entry and entry[0] is current:
+                self._crawler_runs.pop(name, None)
+
+    def wait_crawlers(self, timeout: float | None = None) -> None:
+        """Join running crawler workers (used by `run --once` and tests)."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            with self._crawler_lock:
+                threads = [t for t, _ in self._crawler_runs.values()]
+            alive = [t for t in threads if t.is_alive()]
+            if not alive:
+                return
+            for thread in alive:
+                if deadline is None:
+                    thread.join()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    thread.join(remaining)
+
+    def stop_crawlers(self, timeout: float = 30.0) -> None:
+        """Ask every crawler to stop after its current batch, then join."""
+        with self._crawler_lock:
+            runs = list(self._crawler_runs.values())
+        for _, crawler in runs:
+            crawler.request_stop()
+        deadline = time.monotonic() + timeout
+        for thread, _ in runs:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if thread.is_alive():
+                thread.join(remaining)
 
     # ------------------------------------------------------- live reload
     def reload_source(self, name: str) -> str:
@@ -120,15 +183,19 @@ def build_context(settings: Settings) -> Context:
 
 def run_forever(ctx: Context, stop_event: threading.Event | None = None) -> None:
     """Run scheduler ticks until stop_event is set (CLI run / serve thread)."""
-    while stop_event is None or not stop_event.is_set():
-        try:
-            run_once(ctx)
-        except Exception:
-            log.exception("scheduler tick failed")
-        if stop_event is None:
-            time.sleep(ctx.settings.poll_interval)
-        else:
-            stop_event.wait(ctx.settings.poll_interval)
+    try:
+        while stop_event is None or not stop_event.is_set():
+            try:
+                run_once(ctx)
+            except Exception:
+                log.exception("scheduler tick failed")
+            if stop_event is None:
+                time.sleep(ctx.settings.poll_interval)
+            else:
+                stop_event.wait(ctx.settings.poll_interval)
+    finally:
+        # Do not abandon a half-written crawl batch when the process exits.
+        ctx.stop_crawlers()
 
 
 def run_once(ctx: Context) -> None:

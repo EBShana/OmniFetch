@@ -23,7 +23,7 @@ from .models import (
     Want,
     WantStatus,
 )
-from .util import parse_iso
+from .util import iso, parse_iso, utcnow
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS resources (
@@ -92,6 +92,9 @@ CREATE TABLE IF NOT EXISTS source_runs (
     created INTEGER NOT NULL DEFAULT 0,
     duplicates INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0,
+    finished_at TEXT,
     error TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_source_runs ON source_runs(source, id);
@@ -112,6 +115,27 @@ def init_db(conn: sqlite3.Connection) -> None:
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
     if "last_progress_at" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN last_progress_at TEXT")
+    # ...and before incremental crawl progress.
+    run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(source_runs)")}
+    for column, ddl in (
+        ("done", "ALTER TABLE source_runs ADD COLUMN done INTEGER NOT NULL DEFAULT 0"),
+        ("total", "ALTER TABLE source_runs ADD COLUMN total INTEGER NOT NULL DEFAULT 0"),
+        ("finished_at", "ALTER TABLE source_runs ADD COLUMN finished_at TEXT"),
+    ):
+        if column not in run_cols:
+            conn.execute(ddl)
+    # A row without finished_at belongs to a process that died mid-crawl.
+    # Mark it interrupted so the schedule can retry instead of looking busy
+    # forever (a live crawl is guarded separately by is_crawler_running).
+    conn.execute(
+        """
+        UPDATE source_runs
+        SET error=COALESCE(error, 'interrupted: process exited'),
+            finished_at=?
+        WHERE finished_at IS NULL
+        """,
+        (iso(utcnow()),),
+    )
     conn.commit()
 
 

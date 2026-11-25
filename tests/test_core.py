@@ -281,12 +281,26 @@ class _RecordingCrawler:
         self.config = {"interval": interval}
         self.error = error
         self.calls = 0
+        self._stop = threading.Event()
+
+    def reset_stop(self):
+        self._stop.clear()
+
+    def request_stop(self):
+        self._stop.set()
+
+    def should_stop(self):
+        return self._stop.is_set()
 
     def fetch(self):
         self.calls += 1
         if self.error is not None:
             raise self.error
         return []
+
+    def fetch_batches(self):
+        from omnifetch.crawlers.base import CrawlBatch
+        yield CrawlBatch(list(self.fetch()))
 
 
 def _crawl_ctx(tmp_path, crawler):
@@ -304,16 +318,19 @@ def test_crawler_failure_keeps_detail_and_retries_before_long_interval(tmp_path)
     now = utcnow()
 
     trigger.run_due_crawlers(conn, ctx, now)
+    ctx.wait_crawlers(5)
     assert crawler.calls == 1
     row = conn.execute("SELECT error FROM source_runs").fetchone()
     assert "RuntimeError" in row["error"] and "sheet returned 503" in row["error"]
 
     # No hammering right after a failure ...
     trigger.run_due_crawlers(conn, ctx, now + timedelta(seconds=60))
+    ctx.wait_crawlers(5)
     assert crawler.calls == 1
 
     # ... but a monthly source is retried within minutes, not next month.
     trigger.run_due_crawlers(conn, ctx, now + timedelta(seconds=301))
+    ctx.wait_crawlers(5)
     assert crawler.calls == 2
     conn.close()
 
@@ -326,10 +343,13 @@ def test_successful_crawler_keeps_its_full_interval(tmp_path):
     now = utcnow()
 
     trigger.run_due_crawlers(conn, ctx, now)
+    ctx.wait_crawlers(5)
     trigger.run_due_crawlers(conn, ctx, now + timedelta(seconds=600))
+    ctx.wait_crawlers(5)
     assert crawler.calls == 1
 
     trigger.run_due_crawlers(conn, ctx, now + timedelta(seconds=3601))
+    ctx.wait_crawlers(5)
     assert crawler.calls == 2
     conn.close()
 

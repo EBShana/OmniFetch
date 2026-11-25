@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         ctx = build_context(settings)
         if args.once:
             run_once(ctx)
+            ctx.wait_crawlers()  # --once still finishes the crawl it started
             print("one scheduler tick completed")
             return 0
         print(f"scheduler started (poll interval {settings.poll_interval}s)")
@@ -53,12 +54,17 @@ def main(argv: list[str] | None = None) -> int:
         from .app import create_app
 
         ctx = build_context(settings)  # one context shared by UI and scheduler
+        stop_event = threading.Event()
         threading.Thread(
-            target=run_forever, args=(ctx,),
+            target=run_forever, args=(ctx, stop_event),
             name="omnifetch-scheduler", daemon=True,
         ).start()
         print(f"scheduler started in-process (poll interval {settings.poll_interval}s)")
-        uvicorn.run(create_app(settings, ctx), host=args.host, port=args.port)
+        try:
+            uvicorn.run(create_app(settings, ctx), host=args.host, port=args.port)
+        finally:
+            stop_event.set()
+            ctx.stop_crawlers()
 
     if args.command == "115-login":
         from .config import load_plugin_configs

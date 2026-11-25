@@ -1,6 +1,7 @@
 """VCB-Studio crawler: Google Sheets index -> VCB release pages -> BT mirrors.
 
-Pipeline per fetch() run:
+Pipeline per run (fetch_batches yields every ``batch_size`` rows so the
+scheduler can ingest incrementally and stop between batches):
   1. Download the sheet as CSV through the configured proxy.
   2. For the first ``max_pages_per_run`` rows (sheet is newest-first), fetch
      the VCB release page (Cloudflare-protected; see cf_clearance/playwright
@@ -10,7 +11,7 @@ Pipeline per fetch() run:
        dmhy      fetch page, extract magnet
        bangumi   fetch /api/torrent/<id>, extract magnet
      One Resource per mirror -> they become fallback candidates of the want.
-  4. Politeness delay between VCB pages.
+  4. Politeness delay between VCB pages (interruptible via stop).
 
 Cloudflare handling for vcb-s.com (managed challenge; cloudscraper and
 TLS-impersonation alone do NOT pass):
@@ -28,14 +29,14 @@ import csv
 import io
 import logging
 import re
-import time
+from typing import Iterator
 from urllib.parse import urlparse
 
 import httpx
 
 from ..core.models import Resource, ResourceType
 from . import register
-from .base import CrawlerPlugin
+from .base import CrawlBatch, CrawlInterrupted, CrawlerPlugin
 
 log = logging.getLogger(__name__)
 
@@ -48,37 +49,55 @@ _NYAA_VIEW_RE = re.compile(r"https?://(?:www\.)?nyaa\.si/view/(\d+)")
 class VcbCrawler(CrawlerPlugin):
     type = "vcb"
     DEFAULT_CONFIG = {"sheet_id": "", "gid": "0", "interval": 1800,
-                      "max_pages_per_run": 30, "delay": 2.0, "backend": "cookie"}
+                      "max_pages_per_run": 30, "batch_size": 20,
+                      "delay": 2.0, "backend": "cookie"}
 
     def fetch(self) -> list[Resource]:
+        return [r for batch in self.fetch_batches() for r in batch.resources]
+
+    def fetch_batches(self) -> Iterator[CrawlBatch]:
         proxy = self.config.get("proxy") or None
         max_pages = int(self.config.get("max_pages_per_run", 30))
+        batch_size = max(1, int(self.config.get("batch_size", 20)))
         delay = float(self.config.get("delay", 2.0))
 
         rows = self._fetch_sheet(proxy)
         if max_pages > 0:
             rows = rows[:max_pages]
-        resources: list[Resource] = []
+        total = len(rows)
         backend = self._make_backend()
+        pending: list[Resource] = []
+        done = 0
+        stopped = False
 
         try:
             for row in rows:
+                if self.should_stop():
+                    stopped = True
+                    break
                 link = row.get("link") or ""
-                if not link:
-                    continue
-                try:
-                    html = backend.fetch(link)
-                except Exception as exc:
-                    log.warning("vcb page fetch failed %s: %s", link, exc)
-                    continue
-                if html is None:
-                    continue
-                resources.extend(self._expand_row(row, html, proxy))
-                if delay:
-                    time.sleep(delay)
+                if link:
+                    try:
+                        html = backend.fetch(link)
+                    except Exception as exc:
+                        log.warning("vcb page fetch failed %s: %s", link, exc)
+                        html = None
+                    if html is not None:
+                        pending.extend(self._expand_row(row, html, proxy))
+                done += 1
+                if done % batch_size == 0:
+                    yield CrawlBatch(pending, done, total)
+                    pending = []
+                if delay and not self.sleep(delay):
+                    stopped = True
+                    break
+            if pending or (done and done % batch_size):
+                yield CrawlBatch(pending, done, total)
         finally:
             backend.close()
-        return resources
+
+        if stopped:
+            raise CrawlInterrupted(f"已处理 {done}/{total} 行后中止")
 
     # ------------------------------------------------------------- sheet
 

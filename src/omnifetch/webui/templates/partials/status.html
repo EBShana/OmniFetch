@@ -11,11 +11,12 @@
       <td class="small muted">{{ s.run.started_at[5:16] if s.run else '—' }}</td>
       <td class="small">
         {% if s.run %}
-          {% if s.run.error %}<span class="badge b-red">失败</span>
+          {% if s.running %}<span class="badge b-blue">抓取中</span> <span class="muted">{{ s.run.done }}/{{ s.run.total or '?' }} 行</span>
+          {% elif s.run.error %}<span class="badge b-red">失败</span>
           {% else %}新 {{ s.run.created }} / 重 {{ s.run.duplicates }} · {{ s.run.duration_ms }}ms{% endif %}
         {% else %}<span class="muted">未运行</span>{% endif %}
       </td>
-      <td class="small muted">{{ s.next_due[5:16] if s.next_due else '—' }}</td>
+      <td class="small muted">{{ '运行中' if s.running else (s.next_due[5:16] if s.next_due else '—') }}</td>
     </tr>
     {% endfor %}
   </table>

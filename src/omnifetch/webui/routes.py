@@ -261,14 +261,15 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
         sources = []
         for name, cfg in enabled(sources_cfg).items():
             run = latest.get(name)
+            running = bool(run and not run.get("finished_at"))
             next_due = ""
-            if run:
+            if run and not running:
                 started = parse_iso(run["started_at"])
                 if started:
                     next_due = (started + timedelta(seconds=int(cfg.get("interval", 900)))).isoformat()
             sources.append({"name": name, "type": cfg.get("type", "?"),
                             "interval": int(cfg.get("interval", 900)),
-                            "run": run, "next_due": next_due})
+                            "run": run, "running": running, "next_due": next_due})
         downloaders = []
         for name, dl in ctx.downloaders.items():
             try:

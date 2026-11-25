@@ -14,7 +14,7 @@
       {% for name, r in runs.items() %}
       <tr>
         <td>{{ name }}</td>
-        <td>{% if r.error %}<span class="badge b-red">失败</span>{% else %}新 {{ r.created }} / 重 {{ r.duplicates }}{% endif %}</td>
+        <td>{% if not r.finished_at %}<span class="badge b-blue">抓取中</span> {{ r.done }}/{{ r.total or '?' }}{% elif r.error %}<span class="badge b-red">失败</span>{% else %}新 {{ r.created }} / 重 {{ r.duplicates }}{% endif %}</td>
         <td class="muted">{{ r.started_at[5:16] }}</td>
       </tr>
       {% endfor %}
