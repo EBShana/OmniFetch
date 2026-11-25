@@ -87,6 +87,16 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS ix_tasks_status ON tasks(status, next_retry_at);
 CREATE INDEX IF NOT EXISTS ix_tasks_resource ON tasks(resource_id);
 
+-- One row per submission to a downloader. The daily quota counts attempts,
+-- so retrying the same task again consumes another slot.
+CREATE TABLE IF NOT EXISTS dispatch_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES tasks(id),
+    downloader TEXT NOT NULL,
+    dispatched_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_dispatch_events_time ON dispatch_events(dispatched_at);
+
 CREATE TABLE IF NOT EXISTS source_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source TEXT NOT NULL,

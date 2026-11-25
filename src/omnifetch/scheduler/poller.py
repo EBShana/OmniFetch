@@ -28,11 +28,12 @@ log = logging.getLogger(__name__)
 
 
 def dispatched_today(conn: sqlite3.Connection, now: datetime) -> int:
-    """Tasks submitted since local midnight (the quota resets at 00:00 local)."""
+    """Submissions since local midnight; the quota counts attempts, so a
+    retried task consumes a new slot each time it is submitted."""
     midnight = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
     start = iso(midnight.astimezone(timezone.utc))
     return conn.execute(
-        "SELECT COUNT(*) AS n FROM tasks WHERE dispatched_at >= ?", (start,)
+        "SELECT COUNT(*) AS n FROM dispatch_events WHERE dispatched_at >= ?", (start,)
     ).fetchone()["n"]
 
 

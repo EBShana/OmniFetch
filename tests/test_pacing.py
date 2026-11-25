@@ -152,7 +152,7 @@ def test_daily_limit_resets_after_local_midnight(conn):
 
     # Those two were submitted "yesterday": they no longer consume today's quota.
     yesterday = iso(now - timedelta(days=1))
-    conn.execute("UPDATE tasks SET dispatched_at=? WHERE id IN (?, ?)",
+    conn.execute("UPDATE dispatch_events SET dispatched_at=? WHERE task_id IN (?, ?)",
                  (yesterday, ids[0], ids[1]))
     conn.commit()
     statemachine.complete_task(conn, ids[0], now)
@@ -169,3 +169,23 @@ def test_zero_daily_limit_means_unlimited(conn):
 
     assert poller.dispatch(conn, ctx, utcnow()) == 3
     assert all(fetch_task(conn, i).status == TaskStatus.DOWNLOADING for i in ids)
+
+
+def test_retry_submission_consumes_another_daily_slot(conn):
+    ids = _queued_tasks(conn, 1)
+    ctx = _dispatch_ctx(dispatch_daily_limit=1)
+    now = utcnow()
+    assert poller.dispatch(conn, ctx, now) == 1
+
+    # Same task fails and is submitted again: that is a second attempt and
+    # must consume another slot.
+    conn.execute("UPDATE tasks SET status='QUEUED' WHERE id=?", (ids[0],))
+    conn.commit()
+    assert poller.dispatch(conn, ctx, now) == 0
+
+    # The attempt log rolls over with the local day, not the task row.
+    conn.execute("UPDATE dispatch_events SET dispatched_at=?",
+                 (iso(now - timedelta(days=1)),))
+    conn.execute("UPDATE tasks SET status='QUEUED' WHERE id=?", (ids[0],))
+    conn.commit()
+    assert poller.dispatch(conn, ctx, now) == 1

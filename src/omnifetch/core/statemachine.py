@@ -76,6 +76,7 @@ def begin_download(
     conn: sqlite3.Connection, task_id: int, external_id: str, now: datetime
 ) -> bool:
     """Record the downloader-side handle after a successful submit."""
+    task = conn.execute("SELECT downloader FROM tasks WHERE id=?", (task_id,)).fetchone()
     cur = conn.execute(
         """
         UPDATE tasks SET external_id=?, dispatched_at=?, updated_at=?
@@ -83,6 +84,14 @@ def begin_download(
         """,
         (external_id, iso(now), iso(now), task_id),
     )
+    if cur.rowcount == 1 and task is not None:
+        # Quota is per submission, not per task: a retry submitted later the
+        # same day consumes another slot.
+        conn.execute(
+            "INSERT INTO dispatch_events (task_id, downloader, dispatched_at)"
+            " VALUES (?, ?, ?)",
+            (task_id, task["downloader"], iso(now)),
+        )
     conn.commit()
     return cur.rowcount == 1
 
