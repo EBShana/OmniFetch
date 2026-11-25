@@ -19,8 +19,9 @@ Config keys (downloaders.d/*.toml):
   snapshot_ttl   任务列表快照的复用时长（秒），默认 10
   user_agent     可选（当前未生效，见开发清单）
 
-external_id 约定：`hash:<btih>`（磁链/种子）或 `url:<uri>`（http/ftp/ed2k），
-任务列表按 info_hash / url 匹配。
+external_id 约定：`hash:<btih>`（磁链/种子，或 115 添加任务时返回了 info_hash
+的链接）或 `url:<uri>`（115 没返回 hash 的 http/ftp/ed2k），任务列表按
+info_hash / url 匹配。cancel 只能按 hash 删除，url 键的任务会被明确记日志忽略。
 """
 from __future__ import annotations
 
@@ -364,17 +365,21 @@ class P115Downloader(DownloaderPlugin):
         magnet = _BTITH_RE.search(uri)
         try:
             if magnet:
-                api.add_task_url(uri, self._target_dir, self._savepath)
-                key = f"hash:{btih_hex(magnet.group(1))}"
+                returned = self._returned_hash(
+                    api.add_task_url(uri, self._target_dir, self._savepath))
+                key = f"hash:{returned or btih_hex(magnet.group(1))}"
             elif resource.resource_type == ResourceType.TORRENT or \
                     uri.lower().endswith(".torrent"):
                 # .torrent 文件：解析 infohash 后走 bt 接口（无需上传种子）
                 digest = torrent_infohash(self._fetch_torrent(uri))
-                api.add_task_bt(digest, self._target_dir, self._savepath)
-                key = f"hash:{digest}"
+                returned = self._returned_hash(
+                    api.add_task_bt(digest, self._target_dir, self._savepath))
+                key = f"hash:{returned or digest}"
             else:
-                api.add_task_url(uri, self._target_dir, self._savepath)
-                key = f"url:{uri}"
+                returned = self._returned_hash(
+                    api.add_task_url(uri, self._target_dir, self._savepath))
+                # 115 对部分链接会返回 info_hash；拿到了才能按 hash 取消
+                key = f"hash:{returned}" if returned else f"url:{uri}"
         except DownloadError as exc:
             # 任务已存在 = 幂等成功：返回既有任务的 external_id
             if "已存在" not in str(exc):
@@ -385,6 +390,12 @@ class P115Downloader(DownloaderPlugin):
             key = self._task_key(existing, fallback_uri=uri)
         self._remember_submitted(key)
         return key
+
+    @staticmethod
+    def _returned_hash(data: dict) -> str:
+        """取 115 添加任务响应里的 info_hash；没有则返回空串。"""
+        raw = str((data or {}).get("info_hash") or "").strip()
+        return btih_hex(raw) if raw else ""
 
     def _remember_submitted(self, key: str) -> None:
         """记录提交时刻：115 列表入库有延迟，宽限期内 poll 不判失败。"""
@@ -511,8 +522,13 @@ class P115Downloader(DownloaderPlugin):
 
     def cancel(self, external_id: str) -> None:
         info_hash = external_id.partition(":")[2] if external_id.startswith("hash:") else ""
-        if info_hash:
-            self._get_api().task_del(info_hash)
+        if not info_hash:
+            # 没有 hash 就没法按 115 的 del_task 删除；明确记一笔而不是静默跳过
+            log.warning(
+                "115 任务 %s 没有 info_hash，无法在 115 侧取消"
+                "（已忽略，云端任务可能继续运行）", external_id)
+            return
+        self._get_api().task_del(info_hash)
 
     def ping(self) -> tuple[bool, str]:
         try:

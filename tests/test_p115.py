@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 
 import pytest
@@ -24,10 +25,11 @@ DIGEST = hashlib.sha1(INFO).hexdigest()
 
 
 class FakeApi:
-    def __init__(self, tasks=None, add_error=None, pages=None):
+    def __init__(self, tasks=None, add_error=None, pages=None, return_hash=""):
         self.tasks = tasks or []
         self.add_error = add_error
         self.pages = pages  # {page: [task, ...]}；None 表示只有一页
+        self.return_hash = return_hash  # 模拟 115 添加任务响应里的 info_hash
         self.calls = 0
         self.cookie_expired = False
         self.added_urls: list[str] = []
@@ -35,18 +37,22 @@ class FakeApi:
         self.added_bt_savepaths: list[str] = []
         self.deleted: list[str] = []
 
+    def _added(self) -> dict:
+        return {"state": True, "info_hash": self.return_hash} if self.return_hash \
+            else {"state": True}
+
     def add_task_url(self, url, wp_path_id="0", savepath=""):
         if self.add_error:
             raise self.add_error
         self.added_urls.append(url)
-        return {"state": True}
+        return self._added()
 
     def add_task_bt(self, info_hash, wp_path_id="0", savepath=""):
         if self.add_error:
             raise self.add_error
         self.added_bts.append(info_hash)
         self.added_bt_savepaths.append(savepath)
-        return {"state": True}
+        return self._added()
 
     def refresh_cookies(self):
         return False
@@ -129,6 +135,23 @@ def test_submit_plain_http_gets_url_key():
     dl = make(api)
     key = dl.submit(resource("https://example.com/file.zip", ResourceType.HTTP))
     assert key == "url:https://example.com/file.zip"
+
+
+def test_submit_http_uses_info_hash_returned_by_115():
+    # 115 部分链接会返回 info_hash：用它做键，cancel 才能按 hash 真正删除
+    api = FakeApi(return_hash="AB" * 20)
+    dl = make(api)
+    key = dl.submit(resource("https://example.com/file.zip", ResourceType.HTTP))
+    assert key == "hash:" + "ab" * 20
+    dl.cancel(key)
+    assert api.deleted == ["ab" * 20]
+
+
+def test_submit_magnet_prefers_returned_hash():
+    api = FakeApi(return_hash="CD" * 20)
+    key = make(api).submit(resource(
+        "magnet:?xt=urn:btih:" + "AB" * 20, ResourceType.MAGNET))
+    assert key == "hash:" + "cd" * 20
 
 
 def test_submit_torrent_passes_savepath():
@@ -302,6 +325,15 @@ def test_cancel_deletes_by_hash():
     dl = make(api)
     dl.cancel("hash:" + "ab" * 20)
     assert api.deleted == ["ab" * 20]
+
+
+def test_cancel_without_hash_is_logged_not_silent(caplog):
+    api = FakeApi()
+    dl = make(api)
+    with caplog.at_level(logging.WARNING, logger="omnifetch.downloaders.p115"):
+        dl.cancel("url:https://example.com/file.zip")
+    assert api.deleted == []
+    assert any("info_hash" in record.getMessage() for record in caplog.records)
 
 
 # ------------------------------------------------------------------ ping
