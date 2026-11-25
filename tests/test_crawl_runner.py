@@ -160,6 +160,22 @@ def test_unfinished_run_is_retried_after_restart(tmp_path):
     conn.close()
 
 
+def test_process_interrupted_run_resumes_immediately(tmp_path):
+    # init_db marks a crashed run with exactly this error; restarting the
+    # process is the retry, so do not sit out the failure backoff.
+    conn = connect(str(tmp_path / "crawl.db"))
+    init_db(conn)
+    now = utcnow()
+    conn.execute(
+        "INSERT INTO source_runs (source, started_at, error) VALUES ('slow', ?, ?)",
+        (iso(now), "interrupted: process exited"),
+    )
+    conn.commit()
+
+    assert trigger._is_due(conn, "slow", 86400, now)
+    conn.close()
+
+
 def test_successful_run_keeps_full_interval(tmp_path):
     conn = connect(str(tmp_path / "crawl.db"))
     init_db(conn)

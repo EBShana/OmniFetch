@@ -105,6 +105,10 @@ def _is_due(conn: sqlite3.Connection, name: str, interval: int, now: datetime) -
     last = parse_iso(row["started_at"])
     if last is None:
         return True
+    # A run left behind by a process exit is resumed at the next startup
+    # instead of waiting out the failure backoff: restarting IS the retry.
+    if row["error"] == "interrupted: process exited":
+        return True
     # Unfinished rows mean the process died mid-crawl (a live run is filtered
     # out by is_crawler_running before we get here), so retry soon.
     unfinished = row["finished_at"] is None
