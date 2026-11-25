@@ -20,8 +20,8 @@ Config keys (downloaders.d/*.toml):
   restart_window_seconds  115 标记 retry 的任务重启后的观察窗口，默认 300 秒
   user_agent     可选（当前未生效，见开发清单）
 
-注意：115 的“重启失败任务”接口（ac=restart_task）没有公开文档，参数按
-del_task 的形态推测，标注为“待真机实测”；不能真机验证前不要当成已可用。
+注意：115 的“重启失败任务”接口 action 为 ac=restart（参数 info_hash），
+已由未登录探测与 p115client 源码确认；参数/权限仍待真实账号验证。
 
 external_id 约定：`hash:<btih>`（磁链/种子，或 115 添加任务时返回了 info_hash
 的链接）或 `url:<uri>`（115 没返回 hash 的 http/ftp/ed2k），任务列表按
@@ -253,8 +253,8 @@ class P115Api:
     def task_del(self, info_hash: str) -> None:
         sign, ts = self._sign_token()
         try:
-            self._check(self._request("POST", _CLOUD, params={"ac": "del_task"},
-                                      data={"hash": info_hash,
+            self._check(self._request("POST", _CLOUD, params={"ac": "task_del"},
+                                      data={"hash[0]": info_hash,
                                             "sign": sign, "time": ts}), "删除任务")
         except DownloadError as exc:
             log.info("115 delete task best-effort failed: %s", exc)
@@ -262,12 +262,13 @@ class P115Api:
     def restart_task(self, info_hash: str) -> dict:
         """重启 115 标记为可重试的离线任务。
 
-        ⚠️ 待真机实测：115 没有公开此接口的文档，`ac=restart_task` 与
-        `hash` 参数是按 del_task 的形态推测的，尚未用真实账号验证。
+        action 名 `restart` 与 `info_hash` 参数已由未登录探测和 p115client
+        0.0.9.7.8.3 源码确认；参数/权限待真实账号验证（待真机实测）。
         """
         sign, ts = self._sign_token()
-        data = self._request("POST", _CLOUD, params={"ac": "restart_task"},
-                             data={"hash": info_hash, "sign": sign, "time": ts})
+        data = self._request("POST", _CLOUD, params={"ac": "restart"},
+                             data={"info_hash": info_hash,
+                                   "sign": sign, "time": ts})
         return self._check(data, "重启任务")
 
 

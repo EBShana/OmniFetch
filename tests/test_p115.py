@@ -402,8 +402,35 @@ def test_restart_task_posts_hash_with_signature():
 
     assert api.restart_task("ab" * 20) == {"state": True}
     assert calls["method"] == "POST"
-    assert calls["params"] == {"ac": "restart_task"}
-    assert calls["data"] == {"hash": "ab" * 20, "sign": "sig",
+    assert calls["params"] == {"ac": "restart"}
+    assert calls["data"] == {"info_hash": "ab" * 20, "sign": "sig",
+                             "time": "1700000000"}
+
+
+def test_task_del_posts_hash0_with_signature():
+    api = P115Api("missing.json")
+    calls: dict = {}
+
+    class _Response:
+        status_code = 200
+
+        def json(self):
+            return {"state": True}
+
+    class _Client:
+        def request(self, method, url, **kw):
+            calls.update(method=method, url=url, **kw)
+            return _Response()
+
+    api._client.close()
+    api._client = _Client()
+    api._sign = ("sig", "1700000000")
+    api._sign_at = time.time()
+
+    api.task_del("ab" * 20)
+    assert calls["method"] == "POST"
+    assert calls["params"] == {"ac": "task_del"}
+    assert calls["data"] == {"hash[0]": "ab" * 20, "sign": "sig",
                              "time": "1700000000"}
 
 
