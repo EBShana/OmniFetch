@@ -110,13 +110,6 @@ def _toast(html: str, message: str) -> Response:
 def create_ui_router(settings: Settings, ctx) -> APIRouter:
     router = APIRouter()
 
-    def get_conn():
-        conn = db.connect(settings.db_path)
-        try:
-            yield conn
-        finally:
-            conn.close()
-
     def auth(request: Request) -> None:
         check_token(request, settings)
 
@@ -194,46 +187,52 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
 
     # ------------------------------------------------------- fragments
     @router.get("/frag/dashboard", dependencies=[Depends(auth)])
-    def frag_dashboard(conn: sqlite3.Connection = Depends(get_conn)):
-        wants = {r[0]: r[1] for r in conn.execute(
-            "SELECT status, COUNT(*) FROM wants GROUP BY status")}
-        tasks = {r[0]: r[1] for r in conn.execute(
-            "SELECT status, COUNT(*) FROM tasks GROUP BY status")}
-        stats = {
-            "wants": wants,
-            "tasks": tasks,
-            "completed_today": conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status='COMPLETED' AND updated_at >= ?",
-                (utcnow().isoformat()[:10],),
-            ).fetchone()[0],
-        }
-        runs = {}
-        for r in conn.execute("SELECT * FROM source_runs ORDER BY id DESC LIMIT 200"):
-            runs.setdefault(r["source"], dict(r))
-        recent = [dict(r) for r in conn.execute(
-            """
-            SELECT t.id, t.updated_at, t.downloader, r.title, r.source
-            FROM tasks t JOIN resources r ON r.id = t.resource_id
-            WHERE t.status = 'COMPLETED' ORDER BY t.updated_at DESC LIMIT 8
-            """)]
+    def frag_dashboard():
+        with db.session(settings.db_path) as conn:
+            wants = {r[0]: r[1] for r in conn.execute(
+                "SELECT status, COUNT(*) FROM wants GROUP BY status")}
+            tasks = {r[0]: r[1] for r in conn.execute(
+                "SELECT status, COUNT(*) FROM tasks GROUP BY status")}
+            stats = {
+                "wants": wants,
+                "tasks": tasks,
+                "completed_today": conn.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE status='COMPLETED' AND updated_at >= ?",
+                    (utcnow().isoformat()[:10],),
+                ).fetchone()[0],
+            }
+            runs = {}
+            for r in conn.execute("SELECT * FROM source_runs ORDER BY id DESC LIMIT 200"):
+                runs.setdefault(r["source"], dict(r))
+            recent = [dict(r) for r in conn.execute(
+                """
+                SELECT t.id, t.updated_at, t.downloader, r.title, r.source
+                FROM tasks t JOIN resources r ON r.id = t.resource_id
+                WHERE t.status = 'COMPLETED' ORDER BY t.updated_at DESC LIMIT 8
+                """)]
         return HTMLResponse(render("partials/dashboard.html",
                                    stats=stats, runs=runs, recent=recent))
 
     @router.get("/frag/wants", dependencies=[Depends(auth)])
-    def frag_wants(conn: sqlite3.Connection = Depends(get_conn)):
-        return HTMLResponse(_wants_rows(conn))
+    def frag_wants():
+        with db.session(settings.db_path) as conn:
+            html = _wants_rows(conn)
+        return HTMLResponse(html)
 
     @router.get("/frag/wants/{want_id}/candidates", dependencies=[Depends(auth)])
-    def frag_candidates(want_id: int, conn: sqlite3.Connection = Depends(get_conn)):
-        try:
-            data = get_candidates(conn, want_id)
-        except HTTPException:
-            return HTMLResponse("<p class='muted'>作品不存在</p>")
+    def frag_candidates(want_id: int):
+        with db.session(settings.db_path) as conn:
+            try:
+                data = get_candidates(conn, want_id)
+            except HTTPException:
+                return HTMLResponse("<p class='muted'>作品不存在</p>")
         return HTMLResponse(render("partials/candidates.html", **data))
 
     @router.get("/frag/tasks", dependencies=[Depends(auth)])
-    def frag_tasks(status: str = "", conn: sqlite3.Connection = Depends(get_conn)):
-        return HTMLResponse(_tasks_rows(conn, status or None))
+    def frag_tasks(status: str = ""):
+        with db.session(settings.db_path) as conn:
+            html = _tasks_rows(conn, status or None)
+        return HTMLResponse(html)
 
     def _failures_html(conn: sqlite3.Connection) -> str:
         failed = [dict(r) for r in conn.execute(
@@ -246,8 +245,10 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
         return render("partials/failures.html", failed=failed, given_up=given_up)
 
     @router.get("/frag/failures", dependencies=[Depends(auth)])
-    def frag_failures(conn: sqlite3.Connection = Depends(get_conn)):
-        return HTMLResponse(_failures_html(conn))
+    def frag_failures():
+        with db.session(settings.db_path) as conn:
+            html = _failures_html(conn)
+        return HTMLResponse(html)
 
     @router.get("/frag/status", dependencies=[Depends(auth)])
     def frag_status():
@@ -287,19 +288,20 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
     def ui_create_want(work_key: str = Form(...),
                        display_title: str = Form(""),
                        aliases: str = Form(""),
-                       prefer_sources: str = Form(""),
-                       conn: sqlite3.Connection = Depends(get_conn)):
+                       prefer_sources: str = Form("")):
         alias_list = [a.strip() for a in aliases.replace("，", ",").split(",") if a.strip()]
         src_list = [s.strip() for s in prefer_sources.split(",") if s.strip()]
-        _, matched = _create_want(
-            conn, work_key.strip(), display_title.strip(),
-            {"aliases": alias_list} if alias_list else {},
-            {"prefer_sources": src_list} if src_list else {},
-        )
-        message = f"作品 {work_key} 已创建"
-        if matched:
-            message += f"，匹配到 {matched} 条存量候选"
-        return _toast(_wants_rows(conn), message)
+        with db.session(settings.db_path) as conn:
+            _, matched = _create_want(
+                conn, work_key.strip(), display_title.strip(),
+                {"aliases": alias_list} if alias_list else {},
+                {"prefer_sources": src_list} if src_list else {},
+            )
+            message = f"作品 {work_key} 已创建"
+            if matched:
+                message += f"，匹配到 {matched} 条存量候选"
+            html = _wants_rows(conn)
+        return _toast(html, message)
 
     def _after_task_action(conn, message: str, view: str, want_id: int,
                            status: str = "") -> Response:
@@ -319,51 +321,55 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
 
     @router.post("/ui/tasks/{task_id}/retry", dependencies=[Depends(auth)])
     def ui_retry_task(task_id: int, view: str = Form(""), want_id: int = Form(0),
-                      status: str = Form(""), conn: sqlite3.Connection = Depends(get_conn)):
-        if statemachine.retry_task(conn, task_id, utcnow()):
-            return _after_task_action(conn, f"任务 #{task_id} 已重新排队", view, want_id, status)
+                      status: str = Form("")):
+        with db.session(settings.db_path) as conn:
+            if statemachine.retry_task(conn, task_id, utcnow()):
+                return _after_task_action(conn, f"任务 #{task_id} 已重新排队",
+                                          view, want_id, status)
         raise HTTPException(404, "任务不存在或状态不允许")
 
     @router.post("/ui/tasks/{task_id}/ignore", dependencies=[Depends(auth)])
     def ui_ignore_task(task_id: int, view: str = Form(""), want_id: int = Form(0),
-                       status: str = Form(""), conn: sqlite3.Connection = Depends(get_conn)):
-        if statemachine.ignore_task(conn, task_id, utcnow()):
-            return _after_task_action(conn, f"任务 #{task_id} 已忽略", view, want_id, status)
+                       status: str = Form("")):
+        with db.session(settings.db_path) as conn:
+            if statemachine.ignore_task(conn, task_id, utcnow()):
+                return _after_task_action(conn, f"任务 #{task_id} 已忽略",
+                                          view, want_id, status)
         raise HTTPException(404, "任务不存在或状态不允许")
 
     @router.post("/ui/wants/{want_id}/retry-next", dependencies=[Depends(auth)])
-    def ui_retry_next(want_id: int, view: str = Form(""),
-                      conn: sqlite3.Connection = Depends(get_conn)):
-        row = conn.execute("SELECT status FROM wants WHERE id=?", (want_id,)).fetchone()
-        if row is None:
-            raise HTTPException(404, "want not found")
-        if row["status"] == "ACQUIRED":
-            raise HTTPException(409, "作品已获得，请先重新打开")
-        now = utcnow()
-        conn.execute(
-            """
-            UPDATE tasks SET status='IGNORED', updated_at=?
-            WHERE status IN ('FAILED','FAILED_RETRYABLE','QUEUED')
-              AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
-            """,
-            (now.isoformat(), want_id),
-        )
-        conn.execute("UPDATE wants SET status='WANTED', updated_at=? WHERE id=?",
-                     (now.isoformat(), want_id))
-        conn.commit()
-        outcome = taskgen.advance_want(conn, want_id, ctx.downloader_for, now)
-        messages = {"NEW_TASK": "已切换到下一个候选", "GIVE_UP": "没有可用候选了",
-                    "NO_DOWNLOADER": "没有可用下载器"}
-        html = _failures_html(conn) if view == "failures" else _wants_rows(conn)
+    def ui_retry_next(want_id: int, view: str = Form("")):
+        with db.session(settings.db_path) as conn:
+            row = conn.execute("SELECT status FROM wants WHERE id=?", (want_id,)).fetchone()
+            if row is None:
+                raise HTTPException(404, "want not found")
+            if row["status"] == "ACQUIRED":
+                raise HTTPException(409, "作品已获得，请先重新打开")
+            now = utcnow()
+            conn.execute(
+                """
+                UPDATE tasks SET status='IGNORED', updated_at=?
+                WHERE status IN ('FAILED','FAILED_RETRYABLE','QUEUED')
+                  AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
+                """,
+                (now.isoformat(), want_id),
+            )
+            conn.execute("UPDATE wants SET status='WANTED', updated_at=? WHERE id=?",
+                         (now.isoformat(), want_id))
+            conn.commit()
+            outcome = taskgen.advance_want(conn, want_id, ctx.downloader_for, now)
+            messages = {"NEW_TASK": "已切换到下一个候选", "GIVE_UP": "没有可用候选了",
+                        "NO_DOWNLOADER": "没有可用下载器"}
+            html = _failures_html(conn) if view == "failures" else _wants_rows(conn)
         return _toast(html, messages.get(outcome, outcome))
 
     @router.post("/ui/wants/{want_id}/reopen", dependencies=[Depends(auth)])
-    def ui_reopen(want_id: int, view: str = Form(""),
-                  conn: sqlite3.Connection = Depends(get_conn)):
-        if db.fetch_want(conn, want_id) is None:
-            raise HTTPException(404, "want not found")
-        statemachine.revive_want(conn, want_id, utcnow())
-        html = _failures_html(conn) if view == "failures" else _wants_rows(conn)
+    def ui_reopen(want_id: int, view: str = Form("")):
+        with db.session(settings.db_path) as conn:
+            if db.fetch_want(conn, want_id) is None:
+                raise HTTPException(404, "want not found")
+            statemachine.revive_want(conn, want_id, utcnow())
+            html = _failures_html(conn) if view == "failures" else _wants_rows(conn)
         return _toast(html, "作品已重新打开")
 
     # ---------------------------------------------------------- settings

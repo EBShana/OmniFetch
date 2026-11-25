@@ -1,6 +1,11 @@
 """Web UI + API integration tests: pages, fragments, auth, form actions."""
 from __future__ import annotations
 
+import inspect
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -40,6 +45,58 @@ def _seed_want(settings) -> int:
     conn.commit()
     conn.close()
     return want.id
+
+
+def test_web_requests_use_a_connection_from_their_own_thread(env, monkeypatch):
+    """Regression: /frag/failures returned 500 under load with
+    "SQLite objects created in a thread can only be used in that same thread".
+
+    FastAPI runs sync ``yield`` dependencies and sync endpoints in a
+    threadpool, so a connection handed over by a dependency may cross
+    threads. Endpoints must therefore open/close their own connection.
+    """
+    app, _ = env
+
+    for route in app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is not None:
+            assert "conn" not in inspect.signature(endpoint).parameters, route.path
+
+    violations: list[str] = []
+    closes: list[tuple[int, int]] = []
+
+    class _ThreadBoundConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.origin = threading.get_ident()
+
+        def execute(self, *args, **kwargs):
+            if threading.get_ident() != self.origin:
+                violations.append(args[0])
+            return super().execute(*args, **kwargs)
+
+        def close(self):
+            closes.append((self.origin, threading.get_ident()))
+            super().close()
+
+    def spy_connect(db_path):
+        conn = sqlite3.connect(db_path, timeout=30, factory=_ThreadBoundConnection)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    monkeypatch.setattr(core_db, "connect", spy_connect)
+    client = TestClient(app)
+    paths = ["/frag/failures", "/frag/tasks", "/frag/wants", "/frag/dashboard",
+             "/api/tasks", "/api/wants", "/api/stats"]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = list(pool.map(lambda i: client.get(paths[i % len(paths)]), range(28)))
+
+    assert [r.status_code for r in responses] == [200] * len(responses)
+    assert violations == []
+    assert closes and all(created == used for created, used in closes)
 
 
 def test_dashboard_shows_running_crawl_progress(env):

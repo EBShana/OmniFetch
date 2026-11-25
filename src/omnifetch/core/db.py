@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from .models import (
     ErrorKind,
@@ -108,6 +110,22 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+@contextmanager
+def session(db_path: str) -> Iterator[sqlite3.Connection]:
+    """Open and close a connection in the caller's thread.
+
+    FastAPI runs sync endpoints in a threadpool, so a connection created by a
+    ``yield`` dependency may be used from a different thread. sqlite3 binds a
+    connection to its creating thread, so requests must own their connection
+    from creation to close (never share it across threads).
+    """
+    conn = connect(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db(conn: sqlite3.Connection) -> None:

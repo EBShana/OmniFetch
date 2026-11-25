@@ -98,13 +98,6 @@ def get_candidates(conn: sqlite3.Connection, want_id: int) -> dict[str, Any]:
 def create_api_router(settings: Settings, ctx) -> APIRouter:
     router = APIRouter(prefix="/api")
 
-    def get_conn() -> sqlite3.Connection:
-        conn = db.connect(settings.db_path)
-        try:
-            yield conn
-        finally:
-            conn.close()
-
     def auth(request: Request) -> None:
         check_token(request, settings)
 
@@ -119,51 +112,54 @@ def create_api_router(settings: Settings, ctx) -> APIRouter:
 
     # ------------------------------------------------------------ reads
     @router.get("/stats", dependencies=[Depends(auth)])
-    def stats(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    def stats() -> dict[str, Any]:
         wants = {s.value: 0 for s in WantStatus}
-        wants.update({r[0]: r[1] for r in conn.execute(
-            "SELECT status, COUNT(*) FROM wants GROUP BY status")})
         tasks = {s.value: 0 for s in TaskStatus}
-        tasks.update({r[0]: r[1] for r in conn.execute(
-            "SELECT status, COUNT(*) FROM tasks GROUP BY status")})
-        completed_24h = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status='COMPLETED' AND updated_at >= ?",
-            (utcnow().isoformat()[:10],),
-        ).fetchone()[0]
+        with db.session(settings.db_path) as conn:
+            wants.update({r[0]: r[1] for r in conn.execute(
+                "SELECT status, COUNT(*) FROM wants GROUP BY status")})
+            tasks.update({r[0]: r[1] for r in conn.execute(
+                "SELECT status, COUNT(*) FROM tasks GROUP BY status")})
+            completed_24h = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status='COMPLETED' AND updated_at >= ?",
+                (utcnow().isoformat()[:10],),
+            ).fetchone()[0]
         return {"wants": wants, "tasks": tasks, "completed_today": completed_24h}
 
     @router.get("/wants", dependencies=[Depends(auth)])
-    def list_wants(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
-        rows = conn.execute(
-            """
-            SELECT w.*,
-                (SELECT COUNT(*) FROM resources r WHERE r.want_id = w.id) AS candidates,
-                (SELECT COUNT(*) FROM resources r JOIN tasks t ON t.resource_id = r.id
-                 WHERE r.want_id = w.id
-                   AND t.status IN ('QUEUED','DOWNLOADING','FAILED_RETRYABLE')) AS active_tasks
-            FROM wants w ORDER BY w.id
-            """
-        ).fetchall()
-        return [dict(row) for row in rows]
+    def list_wants() -> list[dict[str, Any]]:
+        with db.session(settings.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT w.*,
+                    (SELECT COUNT(*) FROM resources r WHERE r.want_id = w.id) AS candidates,
+                    (SELECT COUNT(*) FROM resources r JOIN tasks t ON t.resource_id = r.id
+                     WHERE r.want_id = w.id
+                       AND t.status IN ('QUEUED','DOWNLOADING','FAILED_RETRYABLE')) AS active_tasks
+                FROM wants w ORDER BY w.id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     @router.post("/wants", status_code=201, dependencies=[Depends(auth)])
-    def create_want(body: WantIn, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-        try:
-            want, matched = _create_want(conn, body.work_key, body.display_title,
-                                         body.match_rule, body.rank_rule)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
+    def create_want(body: WantIn) -> dict:
+        with db.session(settings.db_path) as conn:
+            try:
+                want, matched = _create_want(conn, body.work_key, body.display_title,
+                                             body.match_rule, body.rank_rule)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
         return {"id": want.id, "work_key": want.work_key, "status": want.status.value,
                 "matched_existing": matched}
 
     @router.get("/wants/{want_id}/candidates", dependencies=[Depends(auth)])
-    def want_candidates(want_id: int,
-                        conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-        return get_candidates(conn, want_id)
+    def want_candidates(want_id: int) -> dict[str, Any]:
+        with db.session(settings.db_path) as conn:
+            return get_candidates(conn, want_id)
 
     @router.get("/resources", dependencies=[Depends(auth)])
-    def list_resources(want_id: int | None = None, status: str | None = None,
-                       conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
+    def list_resources(want_id: int | None = None,
+                       status: str | None = None) -> list[dict[str, Any]]:
         clauses, params = [], []
         if want_id is not None:
             clauses.append("want_id=?")
@@ -172,79 +168,86 @@ def create_api_router(settings: Settings, ctx) -> APIRouter:
             clauses.append("status=?")
             params.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = conn.execute(f"SELECT * FROM resources {where} ORDER BY id DESC LIMIT 500",
-                            params).fetchall()
-        return [dict(row) for row in rows]
+        with db.session(settings.db_path) as conn:
+            rows = conn.execute(f"SELECT * FROM resources {where} ORDER BY id DESC LIMIT 500",
+                                params).fetchall()
+            return [dict(row) for row in rows]
 
     @router.get("/tasks", dependencies=[Depends(auth)])
-    def list_tasks(status: str | None = None,
-                   conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
-        if status:
-            rows = conn.execute("SELECT * FROM tasks WHERE status=? ORDER BY id DESC LIMIT 500",
-                                (status,)).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM tasks ORDER BY id DESC LIMIT 500").fetchall()
-        return [dict(row) for row in rows]
+    def list_tasks(status: str | None = None) -> list[dict[str, Any]]:
+        with db.session(settings.db_path) as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM tasks WHERE status=? ORDER BY id DESC LIMIT 500",
+                    (status,)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM tasks ORDER BY id DESC LIMIT 500").fetchall()
+            return [dict(row) for row in rows]
 
     # -------------------------------------------------------- operations
     @router.post("/tasks/{task_id}/retry", dependencies=[Depends(auth)])
-    def retry_task(task_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-        if not statemachine.retry_task(conn, task_id, utcnow()):
-            raise HTTPException(404, "task not found or not in a retryable state")
+    def retry_task(task_id: int) -> dict:
+        with db.session(settings.db_path) as conn:
+            if not statemachine.retry_task(conn, task_id, utcnow()):
+                raise HTTPException(404, "task not found or not in a retryable state")
         return {"ok": True}
 
     @router.post("/tasks/{task_id}/ignore", dependencies=[Depends(auth)])
-    def ignore_task(task_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-        if not statemachine.ignore_task(conn, task_id, utcnow()):
-            raise HTTPException(404, "task not found or not in an ignorable state")
+    def ignore_task(task_id: int) -> dict:
+        with db.session(settings.db_path) as conn:
+            if not statemachine.ignore_task(conn, task_id, utcnow()):
+                raise HTTPException(404, "task not found or not in an ignorable state")
         return {"ok": True}
 
     @router.post("/wants/{want_id}/retry-next", dependencies=[Depends(auth)])
-    def retry_next(want_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-        row = conn.execute("SELECT status FROM wants WHERE id=?", (want_id,)).fetchone()
-        if row is None:
-            raise HTTPException(404, "want not found")
-        if row["status"] == "ACQUIRED":
-            raise HTTPException(409, "want already acquired; re-open it first")
-        now = utcnow()
-        # In-flight downloads must also be stopped on the tool side, or the
-        # abandoned attempt keeps downloading in the background.
-        for row in conn.execute(
-            """
-            SELECT downloader, external_id FROM tasks
-            WHERE status='DOWNLOADING'
-              AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
-            """,
-            (want_id,),
-        ).fetchall():
-            downloader = ctx.downloaders.get(row["downloader"])
-            if downloader is not None and row["external_id"]:
-                try:
-                    downloader.cancel(row["external_id"])
-                except Exception:
-                    log.warning("retry-next: cancel failed for %s",
-                                row["external_id"], exc_info=True)
-        conn.execute(
-            """
-            UPDATE tasks SET status='IGNORED', updated_at=?
-            WHERE status IN ('QUEUED', 'DOWNLOADING', 'FAILED', 'FAILED_RETRYABLE')
-              AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
-            """,
-            (now.isoformat(), want_id),
-        )
-        conn.execute(
-            "UPDATE wants SET status='WANTED', updated_at=? WHERE id=?",
-            (now.isoformat(), want_id),
-        )
-        conn.commit()
-        outcome = taskgen.advance_want(conn, want_id, ctx.downloader_for, now)
+    def retry_next(want_id: int) -> dict:
+        with db.session(settings.db_path) as conn:
+            row = conn.execute("SELECT status FROM wants WHERE id=?", (want_id,)).fetchone()
+            if row is None:
+                raise HTTPException(404, "want not found")
+            if row["status"] == "ACQUIRED":
+                raise HTTPException(409, "want already acquired; re-open it first")
+            now = utcnow()
+            # In-flight downloads must also be stopped on the tool side, or the
+            # abandoned attempt keeps downloading in the background.
+            for row in conn.execute(
+                """
+                SELECT downloader, external_id FROM tasks
+                WHERE status='DOWNLOADING'
+                  AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
+                """,
+                (want_id,),
+            ).fetchall():
+                downloader = ctx.downloaders.get(row["downloader"])
+                if downloader is not None and row["external_id"]:
+                    try:
+                        downloader.cancel(row["external_id"])
+                    except Exception:
+                        log.warning("retry-next: cancel failed for %s",
+                                    row["external_id"], exc_info=True)
+            conn.execute(
+                """
+                UPDATE tasks SET status='IGNORED', updated_at=?
+                WHERE status IN ('QUEUED', 'DOWNLOADING', 'FAILED', 'FAILED_RETRYABLE')
+                  AND resource_id IN (SELECT id FROM resources WHERE want_id=?)
+                """,
+                (now.isoformat(), want_id),
+            )
+            conn.execute(
+                "UPDATE wants SET status='WANTED', updated_at=? WHERE id=?",
+                (now.isoformat(), want_id),
+            )
+            conn.commit()
+            outcome = taskgen.advance_want(conn, want_id, ctx.downloader_for, now)
         return {"ok": True, "outcome": outcome}
 
     @router.post("/wants/{want_id}/reopen", dependencies=[Depends(auth)])
-    def reopen_want(want_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
-        if db.fetch_want(conn, want_id) is None:
-            raise HTTPException(404, "want not found")
-        statemachine.revive_want(conn, want_id, utcnow())
+    def reopen_want(want_id: int) -> dict:
+        with db.session(settings.db_path) as conn:
+            if db.fetch_want(conn, want_id) is None:
+                raise HTTPException(404, "want not found")
+            statemachine.revive_want(conn, want_id, utcnow())
         return {"ok": True}
 
     return router
