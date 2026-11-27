@@ -28,7 +28,7 @@ def create_app(settings: Settings | None = None, ctx=None) -> FastAPI:
         settings = ctx.settings if ctx is not None else load_settings()
     ctx = ctx or build_context(settings)
 
-    app = FastAPI(title="OmniFetch", version="0.1.1")
+    app = FastAPI(title="OmniFetch", version="0.1.2")
     app.state.ctx = ctx  # exposed for the settings UI live-reload and tests
     app.include_router(create_api_router(settings, ctx))
     app.include_router(create_ui_router(settings, ctx))
