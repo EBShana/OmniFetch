@@ -8,3 +8,5 @@ target_dir_id = "0"        # 网盘保存目录 id（0 = 根目录）；BT/磁�
 savepath = ""              # 仅普通链接（http/ed2k）生效的子路径；BT/磁链不传，避免覆盖自动建目录
 # proxy 仅在抓取 .torrent 文件解析 infohash 时走代理（如 nyaa 需要），115 本身国内直连
 proxy = ""
+# 遇到 403/405/429 或“频繁/风控”提示后进入冷却的秒数；冷却期内不发 115 请求
+risk_cooldown_seconds = 1800

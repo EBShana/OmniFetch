@@ -228,6 +228,10 @@ def _notify_expired_sessions(ctx: Context) -> None:
         if ok:
             _session_notified.pop(name, None)
             continue
+        # 只有确认 Cookie 失效才发“需要重新扫码”；风控冷却/临时故障不冒充失效。
+        api = getattr(downloader, "_api", None)
+        if api is not None and not getattr(api, "cookie_expired", False):
+            continue
         now = time.monotonic()
         if now - _session_notified.get(name, 0.0) >= _SESSION_NOTIFY_INTERVAL:
             _session_notified[name] = now
@@ -246,8 +250,8 @@ def run_once(ctx: Context) -> None:
         for want_id, outcome in taskgen.generate_all(conn, ctx.downloader_for, now):
             if outcome == "GIVE_UP":
                 ctx.notify("want.given_up", {"want_id": want_id})
-            elif outcome == "NO_DOWNLOADER":
-                ctx.notify("want.given_up", {"want_id": want_id, "reason": "no_downloader"})
+            # NO_DOWNLOADER 时作品仍是 WANTED（下载器恢复后会自动继续），
+            # 不要每轮都发 want.given_up，否则会按 poll_interval 刷屏。
         poller.dispatch(conn, ctx, now)
         poller.poll_active(conn, ctx, now)
         _notify_expired_sessions(ctx)

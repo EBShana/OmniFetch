@@ -18,6 +18,8 @@ Config keys (downloaders.d/*.toml):
                  （BT/磁链不传 savepath，避免覆盖 115 的自动建目录行为）
   proxy          可选；仅用于抓取 .torrent 文件解析 infohash，115 本身直连
   submit_grace_seconds  新任务在列表里出现前的宽限期，默认 90 秒
+  risk_cooldown_seconds 遇到 403/405/429 或风控文本后的冷却时长，默认 1800 秒；
+                 冷却期内 submit/poll/健康检查全部本地返回，不发 115 请求
   snapshot_ttl   任务列表快照的复用时长（秒），默认 10
   user_agent     可选（当前未生效，见开发清单）
 
@@ -76,6 +78,15 @@ _PERMANENT_ERROR_KEYWORDS = (
 _TRANSIENT_ERROR_KEYWORDS = (
     "空间不足", "配额", "上限", "频繁", "稍后", "系统繁忙", "网络", "超时", "风控",
 )
+# 这些更像“限流/风控”而不是 Cookie 失效：触发冷却，避免继续撞接口。
+_RISK_ERROR_KEYWORDS = (
+    "频繁", "风控", "请求过多", "操作太快", "操作过快", "访问受限",
+)
+
+
+def _is_risk_text(message: str) -> bool:
+    text = (message or "").lower()
+    return any(k in text for k in _RISK_ERROR_KEYWORDS)
 
 
 def _map_error(message: str, action: str) -> DownloadError:
@@ -216,18 +227,45 @@ class P115Api:
     115 itself is always reached directly: the optional proxy in the config
     only applies to fetching .torrent files (see P115Downloader)."""
 
-    def __init__(self, cookie_file: str, user_agent: str = DEFAULT_UA):
+    def __init__(self, cookie_file: str, user_agent: str = DEFAULT_UA,
+                 risk_cooldown_seconds: float = 1800):
         self._cookie_file = Path(cookie_file)
         self._client = httpx.Client(timeout=30, follow_redirects=False)
         self._client.headers["User-Agent"] = user_agent
         self._cookies_mtime: float | None = None
         self.cookie_expired = False
+        self._risk_cooldown = float(risk_cooldown_seconds or 0)
+        self._cooldown_until = 0.0
+        self._cooldown_reason = ""
         self._load_cookies()
         self._sign: tuple[str, str] | None = None
         self._sign_at = 0.0
 
     def close(self) -> None:
         self._client.close()
+
+    # -- risk cooldown
+    def in_cooldown(self) -> bool:
+        return self._cooldown_until > time.monotonic()
+
+    def cooldown_remaining(self) -> int:
+        return max(0, int(self._cooldown_until - time.monotonic() + 0.999))
+
+    def cooldown_error(self) -> DownloadError:
+        return DownloadError(
+            f"115 风控冷却中（剩余约 {self.cooldown_remaining()} 秒），暂不可用",
+            ErrorKind.TRANSIENT,
+        )
+
+    def _enter_cooldown(self, reason: str) -> None:
+        if self._risk_cooldown <= 0:
+            return
+        self._cooldown_until = time.monotonic() + self._risk_cooldown
+        self._cooldown_reason = reason
+
+    def _ensure_not_cooldown(self) -> None:
+        if self.in_cooldown():
+            raise self.cooldown_error()
 
     # -- cookies
     def _load_cookies(self) -> None:
@@ -266,27 +304,49 @@ class P115Api:
         """非踢人健康检查（`ct=guide&ac=status`，不会踢掉其它设备）。
 
         与 LoginCheck（passportapi check/sso）不同，这里只读登录态。
+        只有 3xx 跳登录页或 JSON `state` 为假才算 Cookie 失效；403/405/429
+        与风控文本属于限流，抛 TRANSIENT 并进入冷却，绝不标记“需要重新扫码”。
         """
+        self._ensure_not_cooldown()
         try:
             resp = self._client.get(
                 _STATUS_URL, params={"_": int(time.time() * 1000)})
         except httpx.HTTPError as exc:
             raise DownloadError(f"115 健康检查失败：{exc}",
                                 ErrorKind.TRANSIENT) from exc
-        if resp.status_code in (301, 302, 303, 307, 308) or resp.status_code >= 400:
+        if resp.status_code in (301, 302, 303, 307, 308):
             self.cookie_expired = True
             return False, "Cookie 已失效（跳转登录页）"
+        if resp.status_code in (403, 405, 429):
+            self._enter_cooldown(f"健康检查 HTTP {resp.status_code}")
+            raise DownloadError(
+                f"115 风控/限流（HTTP {resp.status_code}），已进入冷却",
+                ErrorKind.TRANSIENT,
+            )
+        if resp.status_code >= 400:
+            raise DownloadError(
+                f"115 健康检查失败：HTTP {resp.status_code}",
+                ErrorKind.TRANSIENT,
+            )
         try:
             data = resp.json()
         except ValueError:
             self.cookie_expired = True
             return False, "Cookie 已失效（返回登录页）"
-        ok = bool(data.get("state"))
-        self.cookie_expired = not ok
-        return ok, ("Cookie 有效" if ok else "Cookie 已失效")
+        if not data.get("state"):
+            message = str(data.get("message") or data.get("error") or "Cookie 已失效")
+            if _is_risk_text(message):
+                self._enter_cooldown(message)
+                raise DownloadError(
+                    f"115 风控/限流：{message}", ErrorKind.TRANSIENT)
+            self.cookie_expired = True
+            return False, "Cookie 已失效"
+        self.cookie_expired = False
+        return True, "Cookie 有效"
 
     # -- request core
     def _request(self, method: str, url: str, **kw) -> dict:
+        self._ensure_not_cooldown()
         response = self._client.request(method, url, **kw)
         if response.status_code in (301, 302, 303, 307, 308):
             self.cookie_expired = True
@@ -294,6 +354,15 @@ class P115Api:
                 "115 Cookie 已失效（302 跳登录页），请重新运行 omnifetch 115-login 扫码",
                 ErrorKind.PERMANENT,
             )
+        if response.status_code in (403, 405, 429):
+            self._enter_cooldown(f"HTTP {response.status_code}")
+            raise DownloadError(
+                f"115 风控/限流（HTTP {response.status_code}），已进入冷却",
+                ErrorKind.TRANSIENT,
+            )
+        if response.status_code >= 400:
+            raise DownloadError(
+                f"115 返回 HTTP {response.status_code}", ErrorKind.TRANSIENT)
         try:
             data = response.json()
         except ValueError:
@@ -306,7 +375,12 @@ class P115Api:
 
     def _check(self, data: dict, action: str) -> dict:
         if not data.get("state"):
-            raise _map_error(data.get("error_msg") or data.get("error", ""), action)
+            message = str(data.get("error_msg") or data.get("error", ""))
+            if _is_risk_text(message):
+                self._enter_cooldown(message)
+                raise DownloadError(
+                    f"115 {action}: {message}", ErrorKind.TRANSIENT)
+            raise _map_error(message, action)
         return data
 
     # -- sign（添加任务类接口需要；缓存 10 分钟）
@@ -496,7 +570,7 @@ class P115Downloader(DownloaderPlugin):
                       "target_dir_id": "3571296246695987055",
                       "savepath": "", "proxy": "",
                       "submit_grace_seconds": 90, "snapshot_ttl": 10,
-                      "health_check_ttl": 60,
+                      "health_check_ttl": 60, "risk_cooldown_seconds": 1800,
                       "dispatch_daily_limit": 50}
 
     def __init__(self, name: str, config: dict):
@@ -507,6 +581,7 @@ class P115Downloader(DownloaderPlugin):
         self._proxy = config.get("proxy") or None
         self._api: P115Api | None = None
         self._grace = float(config.get("submit_grace_seconds", 90) or 0)
+        self._risk_cooldown = float(config.get("risk_cooldown_seconds", 1800) or 0)
         self._submitted: dict[str, float] = {}  # external_id -> 提交时刻
         self._max_scan_pages = _MAX_SCAN_PAGES
         self._snapshot_tasks: list[dict] | None = None
@@ -525,7 +600,8 @@ class P115Downloader(DownloaderPlugin):
                     "未配置 cookie_file，请先运行 omnifetch 115-login "
                     f"{self.name} 扫码登录", ErrorKind.PERMANENT,
                 )
-            self._api = P115Api(self._cookie_file)
+            self._api = P115Api(
+                self._cookie_file, risk_cooldown_seconds=self._risk_cooldown)
         return self._api
 
     def _cookie_hint(self) -> str:
@@ -552,6 +628,13 @@ class P115Downloader(DownloaderPlugin):
         if api.refresh_cookies():
             self._health_at = 0.0
             self._health_ok = None
+        if api.in_cooldown():
+            detail = (f"115 风控冷却中（剩余约 {api.cooldown_remaining()} 秒），"
+                      "暂不可用")
+            self._health_ok = False
+            self._health_at = self._now()
+            self._health_detail = detail
+            return False, detail
         now = self._now()
         if (not force and self._health_ok is not None
                 and now - self._health_at < self._health_ttl):
@@ -563,16 +646,23 @@ class P115Downloader(DownloaderPlugin):
             try:
                 ok, detail = api.check_session()
             except DownloadError as exc:
-                ok, detail = False, str(exc)
+                ok = False
+                if api.in_cooldown():
+                    detail = str(api.cooldown_error())
+                else:
+                    # 5xx/网络抖动等临时故障：不能冒充“需要重新扫码”
+                    detail = f"115 暂时不可用：{exc}"
         self._health_ok = ok
         self._health_at = now
         if ok:
             self._health_detail = "115 Cookie 有效"
-        elif detail.startswith("115 需要重新扫码"):
-            self._health_detail = detail
+        elif api.cookie_expired:
+            self._health_detail = (
+                detail if detail.startswith("115 需要重新扫码")
+                else f"115 需要重新扫码：{detail}")
         else:
-            self._health_detail = f"115 需要重新扫码：{detail}"
-        if self._cookie_file:
+            self._health_detail = detail
+        if self._cookie_file and (ok or api.cookie_expired):
             try:
                 write_session_status(self._cookie_file, ok, self._health_detail)
             except OSError as exc:
@@ -586,10 +676,12 @@ class P115Downloader(DownloaderPlugin):
         if not uri:
             raise DownloadError("资源没有下载地址", ErrorKind.PERMANENT)
         api = self._get_api()
-        ok, detail = self.session_status(force=True)
-        if not ok:
-            # 别再拿失效 Cookie 去撞 115 接口
-            raise DownloadError(detail, ErrorKind.PERMANENT)
+        api.refresh_cookies()
+        if api.in_cooldown():
+            raise api.cooldown_error()
+        if api.cookie_expired:
+            # 缓存里已知失效：别再拿失效 Cookie 去撞 115 接口
+            raise DownloadError(self._cookie_hint(), ErrorKind.PERMANENT)
         magnet = _BTITH_RE.search(uri)
         try:
             if magnet:
@@ -721,6 +813,9 @@ class P115Downloader(DownloaderPlugin):
     def poll(self, external_id: str) -> TaskResult:
         api = self._get_api()
         api.refresh_cookies()
+        if api.in_cooldown():
+            return TaskResult(PollStatus.PROGRESS, queued=True,
+                              error_message=str(api.cooldown_error()))
         if api.cookie_expired:
             return self._cookie_expired_result()
         try:
@@ -784,6 +879,6 @@ class P115Downloader(DownloaderPlugin):
 
     def ping(self) -> tuple[bool, str]:
         try:
-            return self.session_status(force=True)
+            return self.session_status(force=False)
         except DownloadError as exc:
             return False, str(exc)

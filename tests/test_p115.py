@@ -39,6 +39,8 @@ class FakeApi:
         self.added_bt_savepaths: list[str | None] = []
         self.deleted: list[str] = []
         self.session_ok = True
+        self.check_calls = 0
+        self.cooldown = False
 
     def _added(self) -> dict:
         return {"state": True, "info_hash": self.return_hash} if self.return_hash \
@@ -62,9 +64,20 @@ class FakeApi:
         return False
 
     def check_session(self):
+        self.check_calls += 1
         if self.cookie_expired:
             return False, "Cookie 已失效"
         return self.session_ok, ("Cookie 有效" if self.session_ok else "Cookie 已失效")
+
+    def in_cooldown(self):
+        return self.cooldown
+
+    def cooldown_remaining(self):
+        return 1800 if self.cooldown else 0
+
+    def cooldown_error(self):
+        return DownloadError("115 风控冷却中（剩余约 1800 秒），暂不可用",
+                             ErrorKind.TRANSIENT)
 
     def task_lists(self, page=1, page_size=30, stat=0):
         self.calls += 1
@@ -730,3 +743,171 @@ def test_submit_blocks_with_reexport_message(tmp_path):
     assert exc_info.value.kind == ErrorKind.PERMANENT
     assert "需要重新扫码" in str(exc_info.value)
     assert api.added_urls == []
+
+
+# ---------------------------------------------------------- risk cooldown
+
+@pytest.mark.parametrize("code", [403, 405, 429])
+def test_check_session_4xx_enters_cooldown_without_expiring(code):
+    class _Resp:
+        status_code = code
+
+        def json(self):
+            return {}
+
+    class _Client:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url, **kw):
+            self.calls += 1
+            return _Resp()
+
+    api = P115Api("missing.json")
+    api._client.close()
+    api._client = _Client()
+    with pytest.raises(DownloadError) as exc_info:
+        api.check_session()
+    assert exc_info.value.kind == ErrorKind.TRANSIENT
+    assert api.cookie_expired is False
+    assert api.in_cooldown() and api.cooldown_remaining() > 0
+    assert api._client.calls == 1
+
+
+def test_check_session_5xx_is_transient_not_expired():
+    class _Resp:
+        status_code = 500
+
+    class _Client:
+        def get(self, url, **kw):
+            return _Resp()
+
+    api = P115Api("missing.json")
+    api._client.close()
+    api._client = _Client()
+    with pytest.raises(DownloadError) as exc_info:
+        api.check_session()
+    assert exc_info.value.kind == ErrorKind.TRANSIENT
+    assert api.cookie_expired is False
+    assert api.in_cooldown() is False
+
+
+def test_check_session_state_false_marks_expired():
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"state": False, "message": "请重新登录"}
+
+    class _Client:
+        def get(self, url, **kw):
+            return _Resp()
+
+    api = P115Api("missing.json")
+    api._client.close()
+    api._client = _Client()
+    ok, detail = api.check_session()
+    assert ok is False and api.cookie_expired is True
+    assert api.in_cooldown() is False
+    assert "失效" in detail
+
+
+def test_cooldown_blocks_request_without_network():
+    class _Client:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, method, url, **kw):
+            self.calls += 1
+            raise AssertionError("不应发出网络请求")
+
+        def get(self, url, **kw):
+            self.calls += 1
+            raise AssertionError("不应发出网络请求")
+
+    api = P115Api("missing.json")
+    api._client.close()
+    api._client = _Client()
+    api._enter_cooldown("测试")
+    with pytest.raises(DownloadError) as exc_info:
+        api._request("GET", "https://115.com/")
+    assert exc_info.value.kind == ErrorKind.TRANSIENT
+    with pytest.raises(DownloadError):
+        api.check_session()
+    assert api._client.calls == 0
+
+
+def test_submit_does_not_force_health_check():
+    api = FakeApi()
+    dl = make(api)
+    dl.submit(resource("magnet:?xt=urn:btih:" + "AB" * 20,
+                       ResourceType.MAGNET))
+    assert api.check_calls == 0
+    assert api.added_urls
+
+
+def test_submit_during_cooldown_is_transient_without_network():
+    api = FakeApi()
+    api.cooldown = True
+    dl = make(api)
+    with pytest.raises(DownloadError) as exc_info:
+        dl.submit(resource("magnet:?xt=urn:btih:" + "AB" * 20,
+                           ResourceType.MAGNET))
+    assert exc_info.value.kind == ErrorKind.TRANSIENT
+    assert "冷却" in str(exc_info.value)
+    assert api.check_calls == 0
+    assert api.added_urls == []
+
+
+def test_poll_during_cooldown_waits_without_network():
+    api = FakeApi(tasks=[_task()])
+    api.cooldown = True
+    dl = make(api)
+    result = dl.poll("hash:" + "ab" * 20)
+    assert result.status == PollStatus.PROGRESS
+    assert result.queued is True
+    assert api.calls == 0
+
+
+def test_session_status_during_cooldown_is_local():
+    api = FakeApi()
+    api.cooldown = True
+    dl = make(api)
+    ok, detail = dl.session_status(force=True)
+    assert ok is False
+    assert "冷却" in detail
+    assert api.check_calls == 0
+
+
+def test_transient_health_failure_does_not_mark_reexport(tmp_path):
+    class _Transient(FakeApi):
+        def check_session(self):
+            raise DownloadError("HTTP 500", ErrorKind.TRANSIENT)
+
+    cookie = tmp_path / "cookies.json"
+    cookie.write_text(json.dumps({"UID": "u"}), encoding="utf-8")
+    dl = make(_Transient(), cookie_file=str(cookie))
+    ok, detail = dl.session_status(force=True)
+    assert ok is False
+    assert "暂时不可用" in detail
+    assert "需要重新扫码" not in detail
+    assert p115.read_session_status(cookie) == {}
+
+
+def test_cooldown_health_check_does_not_write_expired_marker(tmp_path):
+    cookie = tmp_path / "cookies.json"
+    cookie.write_text(json.dumps({"UID": "u"}), encoding="utf-8")
+    api = FakeApi()
+    api.cooldown = True
+    dl = make(api, cookie_file=str(cookie))
+    ok, detail = dl.session_status(force=True)
+    assert ok is False and "冷却" in detail
+    assert p115.read_session_status(cookie) == {}
+
+
+def test_ping_reuses_health_cache():
+    api = FakeApi()
+    dl = make(api)
+    dl.ping()
+    dl.ping()
+    assert api.check_calls == 1

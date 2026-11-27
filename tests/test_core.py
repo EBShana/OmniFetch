@@ -535,3 +535,29 @@ def test_fail_task_on_non_downloading_task_is_noop(conn):
     )
     assert first == FailOutcome.FAILED
     assert second == FailOutcome.NOOP
+
+
+def test_run_once_does_not_notify_when_no_downloader(tmp_path):
+    db_path = str(tmp_path / "no-downloader.db")
+    conn = connect(db_path)
+    init_db(conn)
+    res, _ = ingest.ingest_resource(
+        conn, make_resource("https://a.example/nd", "Work 1080p")
+    )
+    want_id = attach(conn, res)
+
+    class Recorder:
+        def __init__(self):
+            self.events = []
+
+        def send(self, event):
+            self.events.append(event)
+
+    recorder = Recorder()
+    settings = Settings(db_path=db_path, config_dir=str(tmp_path / "cfg"))
+    ctx = runner.Context(settings, {}, {}, [recorder])
+    runner.run_once(ctx)
+
+    assert [e.type for e in recorder.events if e.type == "want.given_up"] == []
+    assert fetch_want(conn, want_id).status == WantStatus.WANTED
+    conn.close()
