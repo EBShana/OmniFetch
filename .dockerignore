@@ -6,3 +6,9 @@ downloads
 __pycache__
 *.egg-info
 .pytest_cache
+# 本地真实配置/凭证绝不进构建上下文（示例配置保留）
+config/omnifetch.toml
+config/sources.d/vcb.toml
+config/downloaders.d/p115.toml
+config/**/*.cookie
+config/**/*cookies*.json
