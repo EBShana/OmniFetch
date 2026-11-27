@@ -23,6 +23,8 @@
         <span class="badge b-orange">未配置</span>
         {% elif inst.cookie_state and inst.cookie_state.ok == false %}
         <span class="badge b-red">需要重新扫码</span>
+        {% elif inst.cooldown_remaining %}
+        <span class="badge b-orange">冷却中（剩余 {{ inst.cooldown_remaining }} 秒）</span>
         {% elif inst.cookie_state and inst.cookie_state.ok %}
         <span class="badge b-green">已配置（有效）</span>
         {% else %}
@@ -42,6 +44,15 @@
                placeholder="粘贴 Cookie 字符串：UID=…; CID=…; SEID=…; KID=…">
         <label class="small muted"><input type="checkbox" name="clear_cookie"> 清空已保存 Cookie</label>
       </div>
+      <div id="p115-login-box-{{ inst.name }}" class="status-line">
+        <b class="small">扫码登录</b>
+        <button class="btn mini" type="button"
+                hx-post="/ui/p115/qr/start"
+                hx-vals='{"name": "{{ inst.name }}"}'
+                hx-target="#p115-login-box-{{ inst.name }}"
+                hx-swap="innerHTML">生成二维码</button>
+        <span class="muted small">当前渠道：{{ inst.fields.get('login_app', 'android') }}（改渠道请先保存）</span>
+      </div>
     </div>
     <div class="inst-block status-line">
       <label class="small">每日派发上限
@@ -55,7 +66,13 @@
     <div class="grid-form compact">
       {% for k, v in inst.fields.items() %}
       <label>{{ field_label(k) }}
-        {% if v is number and v is not boolean %}
+        {% if k == 'login_app' %}
+        <select name="login_app">
+          {% for app in p115_apps %}
+          <option value="{{ app }}" {% if app == v %}selected{% endif %}>{{ app }}</option>
+          {% endfor %}
+        </select>
+        {% elif v is number and v is not boolean %}
         <input type="number" min="0" step="1" name="{{ k }}" value="{{ v }}">
         {% else %}
         <input name="{{ k }}" value="{{ v if v is not none else '' }}">

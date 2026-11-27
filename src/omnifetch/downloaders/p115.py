@@ -437,8 +437,8 @@ def qr_login_url(app: str) -> str:
     return _QR_LOGIN_APP.format(app=app)
 
 
-def write_qr_png(matrix, path: str | Path, scale: int = 8) -> None:
-    """纯标准库写 PNG（不依赖 Pillow）。matrix 为 qrcode.get_matrix()。"""
+def qr_png_bytes(matrix, scale: int = 8) -> bytes:
+    """把二维码矩阵编码成 PNG 字节（纯标准库，不依赖 Pillow）。"""
     height, width = len(matrix), len(matrix[0])
     raw = bytearray()
     for row in matrix:
@@ -454,11 +454,14 @@ def write_qr_png(matrix, path: str | Path, scale: int = 8) -> None:
                 + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
 
     ihdr = struct.pack(">IIBBBBB", width * scale, height * scale, 8, 0, 0, 0, 0)
-    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-           + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b""))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b""))
+
+
+def write_qr_png(matrix, path: str | Path, scale: int = 8) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(png)
+    target.write_bytes(qr_png_bytes(matrix, scale))
 
 
 def _credential_from_response(resp) -> dict[str, str]:
@@ -484,70 +487,86 @@ def _credential_from_response(resp) -> dict[str, str]:
     return jar
 
 
-def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
-                 timeout: int = 180, app: str | None = None,
-                 qr_png: str | None = None,
-                 fallback_web: bool = False) -> str:
-    """扫码登录，返回实际成功的渠道名。
+class QrLoginSession:
+    """一次扫码登录会话，供 CLI 与 Web UI 共用。
 
-    app 渠道优先（默认 android），只有显式 fallback_web=True 时才回退 web。
-    qr_png 指定时会把二维码矩阵导出为 PNG。
+    poll() 不阻塞：返回 (state, message)，state 为
+    waiting / done / expired / canceled / error。done 后重复调用仍返回 done。
     """
-    import qrcode
 
-    app = (app or "android").strip().lower()
-    if app not in _QR_APPS:
-        raise DownloadError(f"不支持的扫码渠道：{app}", ErrorKind.PERMANENT)
-    client = httpx.Client(timeout=30)
-    client.headers["User-Agent"] = user_agent
-    try:
-        token = client.get(_QR_TOKEN).json()["data"]
-        qr = qrcode.QRCode(border=4 if qr_png else 1)
-        qr.add_data(token["qrcode"])
-        qr.make(fit=True)
-        qr.print_ascii(invert=True)
-        if qr_png:
-            write_qr_png(qr.get_matrix(), qr_png)
-            print(f"二维码已导出：{qr_png}")
-        print("请用 115 手机 App 扫描上方二维码（%d 秒内）…" % timeout)
+    def __init__(self, cookie_file: str, user_agent: str = DEFAULT_UA,
+                 app: str | None = None, fallback_web: bool = False):
+        import qrcode
 
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            time.sleep(2)
-            resp = client.get(_QR_PROMPT, params={
-                "uid": token["uid"], "sign": token["sign"],
-                "time": token["time"], "_": int(time.time() * 1000),
+        self.cookie_file = cookie_file
+        self.app = (app or "android").strip().lower()
+        if self.app not in _QR_APPS:
+            raise DownloadError(f"不支持的扫码渠道：{self.app}",
+                                ErrorKind.PERMANENT)
+        self.fallback_web = fallback_web
+        self.state = "waiting"
+        self.channel = ""
+        self.message = "等待扫码"
+        self._client = httpx.Client(timeout=30)
+        self._client.headers["User-Agent"] = user_agent
+        try:
+            self.token = self._client.get(_QR_TOKEN).json()["data"]
+            self._qr = qrcode.QRCode(border=4)
+            self._qr.add_data(self.token["qrcode"])
+            self._qr.make(fit=True)
+        except Exception:
+            self.close()
+            raise
+
+    def print_ascii(self) -> None:
+        self._qr.print_ascii(invert=True)
+
+    def png_bytes(self) -> bytes:
+        return qr_png_bytes(self._qr.get_matrix())
+
+    def poll(self) -> tuple[str, str]:
+        if self.state != "waiting":
+            return self.state, self.message
+        try:
+            resp = self._client.get(_QR_PROMPT, params={
+                "uid": self.token["uid"], "sign": self.token["sign"],
+                "time": self.token["time"], "_": int(time.time() * 1000),
             }).json()
-            status = (resp.get("data") or {}).get("status")
-            if status == 2:
-                break
-            if status == -1:
-                raise DownloadError("二维码已过期，请重新生成", ErrorKind.TRANSIENT)
-            if status == -2:
-                raise DownloadError("已在手机端取消登录", ErrorKind.PERMANENT)
-            if status is False or (not resp.get("state") and status is None):
-                raise DownloadError(f"扫码状态异常：{resp.get('message')}",
-                                    ErrorKind.PERMANENT)
-        else:
-            raise DownloadError("扫码超时，请重试", ErrorKind.TRANSIENT)
+        except httpx.HTTPError as exc:
+            self.state = "error"
+            self.message = f"扫码状态查询失败：{exc}"
+            return self.state, self.message
+        status = (resp.get("data") or {}).get("status")
+        if status == 2:
+            return self._confirm()
+        if status == -1:
+            self.state, self.message = "expired", "二维码已过期，请重新生成"
+        elif status == -2:
+            self.state, self.message = "canceled", "已在手机端取消登录"
+        elif status is False or (not resp.get("state") and status is None):
+            self.state = "error"
+            self.message = f"扫码状态异常：{resp.get('message')}"
+        return self.state, self.message
 
-        candidates = [app] + (["web"] if fallback_web and app != "web" else [])
+    def _confirm(self) -> tuple[str, str]:
+        candidates = ([self.app]
+                      + (["web"] if self.fallback_web and self.app != "web" else []))
         last_error = ""
         for candidate in candidates:
-            login = client.post(qr_login_url(candidate),
-                                data={"account": token["uid"], "app": candidate})
+            login = self._client.post(qr_login_url(candidate), data={
+                "account": self.token["uid"], "app": candidate})
             if login.status_code >= 400:
                 last_error = f"{candidate} 渠道登录确认失败 HTTP {login.status_code}"
                 continue
             jar = _credential_from_response(login)
             if not jar:
                 # web 渠道可能只通过 Set-Cookie 下发
-                jar = {m.name: m.value for m in client.cookies.jar
+                jar = {m.name: m.value for m in self._client.cookies.jar
                        if m.name in _COOKIE_NAMES}
             if not jar:
                 last_error = f"{candidate} 渠道登录响应未包含 UID/CID/SEID/KID"
                 continue
-            api = P115Api(cookie_file=cookie_file)
+            api = P115Api(cookie_file=self.cookie_file)
             try:
                 for name, value in jar.items():
                     api._client.cookies.set(name, value, domain=".115.com")
@@ -558,13 +577,52 @@ def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
                 api.save_cookies()
             finally:
                 api.close()
-            write_session_status(cookie_file, True, "Cookie 有效")
-            print(f"登录成功（{candidate} 渠道），Cookie 已保存到 {cookie_file}")
-            return candidate
-        raise DownloadError("扫码确认后登录失败：" + (last_error or "未知原因"),
-                            ErrorKind.PERMANENT)
+            write_session_status(self.cookie_file, True, "Cookie 有效")
+            self.state, self.channel = "done", candidate
+            self.message = f"登录成功（{candidate} 渠道），Cookie 已保存"
+            return self.state, self.message
+        self.state = "error"
+        self.message = "扫码确认后登录失败：" + (last_error or "未知原因")
+        return self.state, self.message
+
+    def close(self) -> None:
+        self._client.close()
+
+
+def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
+                 timeout: int = 180, app: str | None = None,
+                 qr_png: str | None = None,
+                 fallback_web: bool = False) -> str:
+    """扫码登录，返回实际成功的渠道名。
+
+    app 渠道优先（默认 android），只有显式 fallback_web=True 时才回退 web。
+    qr_png 指定时会把二维码矩阵导出为 PNG。
+    """
+    session = QrLoginSession(cookie_file, user_agent=user_agent, app=app,
+                             fallback_web=fallback_web)
+    try:
+        session.print_ascii()
+        if qr_png:
+            target = Path(qr_png)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(session.png_bytes())
+            print(f"二维码已导出：{qr_png}")
+        print("请用 115 手机 App 扫描上方二维码（%d 秒内）…" % timeout)
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(2)
+            state, message = session.poll()
+            if state == "done":
+                print(message)
+                return session.channel
+            if state == "expired":
+                raise DownloadError(message, ErrorKind.TRANSIENT)
+            if state in ("canceled", "error"):
+                raise DownloadError(message, ErrorKind.PERMANENT)
+        raise DownloadError("扫码超时，请重试", ErrorKind.TRANSIENT)
     finally:
-        client.close()
+        session.close()
 
 
 # -------------------------------------------------------------------- plugin
@@ -575,7 +633,7 @@ class P115Downloader(DownloaderPlugin):
     accepts = (ResourceType.MAGNET, ResourceType.TORRENT, ResourceType.HTTP,
                ResourceType.NETDISK)
     DEFAULT_CONFIG = {"cookie_file": "data/p115_cookies.json",
-                      "target_dir_id": "3571296246695987055",
+                      "target_dir_id": "0",
                       "savepath": "", "proxy": "",
                       "submit_grace_seconds": 90, "snapshot_ttl": 10,
                       "health_check_ttl": 60, "risk_cooldown_seconds": 1800,

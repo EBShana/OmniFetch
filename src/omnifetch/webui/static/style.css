@@ -112,6 +112,10 @@ details.panel summary { cursor: pointer; font-weight: 600; }
 .status-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .cookie-row { margin-top: 2px; }
 .cookie-row input[type=password] { flex: 1; min-width: 260px; }
+.p115-qr { display: flex; flex-direction: column; gap: 6px; align-items: flex-start;
+  margin: 8px 0 4px; }
+.p115-qr img { width: 220px; height: 220px; background: #fff; padding: 6px;
+  border-radius: 6px; image-rendering: pixelated; }
 .core-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .core-save { display: flex; align-items: center; gap: 12px; margin: 4px 0 12px; }
 .btn.danger { color: var(--red); border-color: #5a2c36; }

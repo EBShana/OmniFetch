@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 import tomllib
 from pathlib import Path
@@ -15,6 +16,7 @@ from omnifetch.app import create_app
 from omnifetch.config import CORE_TOML, Settings, dump_toml, load_settings
 from omnifetch.notify import WebhookNotifier
 from omnifetch.scheduler.runner import build_context
+from omnifetch.webui import routes as routes_mod
 
 SOURCE_TOML = """\
 name = "demo-rss"
@@ -396,3 +398,93 @@ def test_create_app_reuses_given_context(tmp_path):
     ctx = build_context(settings)
     app = create_app(settings, ctx)
     assert app.state.ctx is ctx
+
+
+def test_p115_card_renders_login_fields_and_qr_button(p115_env):
+    client, _, _ = p115_env
+    html = client.get("/frag/settings").text
+    for field in ("login_app", "target_dir_id", "savepath", "cookie_file",
+                  "proxy", "risk_cooldown_seconds", "health_check_ttl",
+                  "snapshot_ttl"):
+        assert f'name="{field}"' in html
+    assert '<select name="login_app">' in html
+    assert "alipaymini" in html
+    assert "生成二维码" in html
+    assert "3571296246695987055" not in html
+
+
+def test_p115_default_target_dir_is_root():
+    from omnifetch.downloaders.p115 import P115Downloader
+
+    assert P115Downloader.DEFAULT_CONFIG["target_dir_id"] == "0"
+
+
+class _FakeQrSession:
+    states = [("waiting", "等待扫码"), ("done", "登录成功（alipaymini 渠道），Cookie 已保存")]
+
+    def __init__(self, cookie_file, app=None, fallback_web=False):
+        self.app = app or "android"
+        self.fallback_web = fallback_web
+        self._states = list(self.states)
+        self.closed = False
+
+    def png_bytes(self):
+        return b"\x89PNG\r\n\x1a\nfake"
+
+    def poll(self):
+        return self._states.pop(0) if self._states else ("waiting", "等待扫码")
+
+    def close(self):
+        self.closed = True
+
+
+def test_p115_qr_login_flow_polls_and_reloads(p115_env, monkeypatch):
+    client, _, _ = p115_env
+    monkeypatch.setattr(routes_mod, "QrLoginSession", _FakeQrSession)
+    called: list[str] = []
+    ctx = client.app.state.ctx
+    ctx.reload_downloader = lambda name: called.append(name) or "ok"
+
+    html = client.post("/ui/p115/qr/start", data={"name": "p115"}).text
+    assert "data:image/png;base64," in html
+    sid = re.search(r"/ui/p115/qr/([^/]+)/status", html).group(1)
+
+    assert "等待扫码" in client.get(f"/ui/p115/qr/{sid}/status").text
+    done = client.get(f"/ui/p115/qr/{sid}/status").text
+    assert "登录成功" in done
+    assert 'hx-get="/frag/settings"' in done
+    assert called == ["p115"]
+    assert "会话已失效" in client.get(f"/ui/p115/qr/{sid}/status").text
+
+
+def test_p115_qr_login_expired_offers_retry(p115_env, monkeypatch):
+    client, _, _ = p115_env
+
+    class _Expired(_FakeQrSession):
+        states = [("expired", "二维码已过期，请重新生成")]
+
+    monkeypatch.setattr(routes_mod, "QrLoginSession", _Expired)
+    html = client.post("/ui/p115/qr/start", data={"name": "p115"}).text
+    sid = re.search(r"/ui/p115/qr/([^/]+)/status", html).group(1)
+    text = client.get(f"/ui/p115/qr/{sid}/status").text
+    assert "已过期" in text
+    assert "重新生成" in text and "/ui/p115/qr/start" in text
+
+
+def test_p115_card_shows_cooldown_remaining(p115_env):
+    client, _, cookie = p115_env
+    cookie.write_text(json.dumps({"UID": "u"}), encoding="utf-8")
+
+    class _Api:
+        def in_cooldown(self):
+            return True
+
+        def cooldown_remaining(self):
+            return 123
+
+    class _Dl:
+        _api = _Api()
+
+    client.app.state.ctx.downloaders["p115"] = _Dl()
+    html = client.get("/frag/settings").text
+    assert "冷却中（剩余 123 秒）" in html

@@ -6,9 +6,13 @@ actions enforce the token — the shell pops a token prompt on the first
 """
 from __future__ import annotations
 
+import base64
 import hmac
+import html
 import json
+import secrets
 import sqlite3
+import threading
 import time
 from datetime import timedelta
 from importlib.resources import files
@@ -36,8 +40,9 @@ from ..crawlers import crawler_types
 from ..crawlers import default_config as crawler_default_config
 from ..downloaders import default_config as downloader_default_config
 from ..downloaders import dispatch_daily_limit, downloader_types
-from ..downloaders.p115 import (P115Downloader, parse_cookie_string,
-                                read_session_status, write_cookie_file)
+from ..downloaders.p115 import (P115Downloader, QrLoginSession,
+                                parse_cookie_string, read_session_status,
+                                write_cookie_file)
 from ..webapi.app import check_token, get_candidates
 from .auth import (SESSION_COOKIE, SESSION_TTL, LoginThrottle, create_session,
                    session_secret, verify_session)
@@ -110,6 +115,13 @@ _FIELD_LABELS = {
 
 _P115_DEFAULT_COOKIE = P115Downloader.DEFAULT_CONFIG["cookie_file"]
 templates.env.globals["field_label"] = lambda k: _FIELD_LABELS.get(k, k)
+
+# Web UI 扫码登录的短期会话（进程内，单用户）。二维码 10 分钟有效。
+_QR_SESSIONS: dict[str, dict] = {}
+_QR_LOCK = threading.Lock()
+_QR_TTL_SECONDS = 600
+_P115_APPS = ("android", "alipaymini", "wechatmini", "tv", "ios",
+              "qandroid", "web")
 
 
 def _cookie_configured(cfg: dict) -> bool:
@@ -490,6 +502,9 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
                 item = {"kind": kind, "name": name, "type": ptype,
                         "enabled": bool(cfg.get("enabled", True)), "fields": fields}
                 if kind == "downloader" and ptype == "p115":
+                    # 即使 toml 里缺字段也渲染出可编辑项，保存后即写入配置。
+                    for key, default in P115Downloader.DEFAULT_CONFIG.items():
+                        fields.setdefault(key, default)
                     # Rendered in dedicated sections rather than the generic grid.
                     fields.pop("dispatch_daily_limit", None)
                     item["daily_limit"] = dispatch_daily_limit(ptype, cfg)
@@ -503,6 +518,10 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
                         item["cookie_checked"] = time.strftime(
                             "%m-%d %H:%M",
                             time.localtime(float(status["checked_at"])))
+                    api = getattr(ctx.downloaders.get(name), "_api", None)
+                    if api is not None and getattr(api, "in_cooldown", None) \
+                            and api.in_cooldown():
+                        item["cooldown_remaining"] = api.cooldown_remaining()
                 out.append(item)
             return out
 
@@ -517,11 +536,93 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
             downloaders=instances(dls_cfg, "downloader"),
             crawler_types=crawler_types(),
             downloader_types=downloader_types(),
+            p115_apps=_P115_APPS,
         )
 
     @router.get("/frag/settings", dependencies=[Depends(auth)])
     def frag_settings():
         return HTMLResponse(_settings_html())
+
+    def _drop_qr_session(sid: str) -> None:
+        with _QR_LOCK:
+            entry = _QR_SESSIONS.pop(sid, None)
+        if entry is not None:
+            try:
+                entry["session"].close()
+            except Exception:
+                pass
+
+    @router.post("/ui/p115/qr/start", dependencies=[Depends(auth)])
+    def ui_p115_qr_start(name: str = Form(...)):
+        _, dls_cfg = load_plugin_configs(settings.config_dir)
+        cfg = dls_cfg.get(name) or {}
+        if cfg.get("type") != "p115":
+            return HTMLResponse('<span class="err-text">p115 实例不存在</span>')
+        cookie_file = str(cfg.get("cookie_file") or _P115_DEFAULT_COOKIE)
+        app = str(cfg.get("login_app") or "android")
+        try:
+            session = QrLoginSession(cookie_file, app=app, fallback_web=False)
+        except Exception as exc:
+            return HTMLResponse(
+                '<span class="err-text">生成二维码失败：'
+                f'{html.escape(str(exc))}</span>')
+        sid = secrets.token_urlsafe(18)
+        now = time.time()
+        with _QR_LOCK:
+            for old_sid, entry in list(_QR_SESSIONS.items()):
+                if now - entry["created"] > _QR_TTL_SECONDS:
+                    entry["session"].close()
+                    _QR_SESSIONS.pop(old_sid, None)
+            _QR_SESSIONS[sid] = {"session": session, "name": name,
+                                 "app": app, "created": now,
+                                 "lock": threading.Lock()}
+        b64 = base64.b64encode(session.png_bytes()).decode("ascii")
+        return HTMLResponse(
+            '<div class="p115-qr">'
+            f'<img alt="115 登录二维码" src="data:image/png;base64,{b64}">'
+            '<div class="small muted">请用手机 115 App 扫码（'
+            f'{html.escape(app)} 渠道），确认后自动保存 Cookie</div>'
+            f'<div hx-get="/ui/p115/qr/{sid}/status" hx-trigger="every 2s" '
+            'hx-target="this" hx-swap="innerHTML">等待扫码…</div>'
+            '</div>')
+
+    @router.get("/ui/p115/qr/{sid}/status", dependencies=[Depends(auth)])
+    def ui_p115_qr_status(sid: str):
+        entry = _QR_SESSIONS.get(sid)
+        if entry is None:
+            return HTMLResponse(
+                '<span class="err-text">二维码会话已失效，请重新生成</span>')
+        if time.time() - entry["created"] > _QR_TTL_SECONDS:
+            _drop_qr_session(sid)
+            return HTMLResponse(
+                '<span class="err-text">二维码已过期，请重新生成</span>')
+        with entry["lock"]:
+            try:
+                state, message = entry["session"].poll()
+            except Exception as exc:
+                state, message = "error", f"扫码登录异常：{exc}"
+        if state == "waiting":
+            return HTMLResponse(
+                f'<span class="small muted">{html.escape(message)}</span>')
+        _drop_qr_session(sid)
+        if state == "done":
+            try:
+                ctx.reload_downloader(entry["name"])
+            except Exception:
+                pass
+            return HTMLResponse(
+                '<div class="small" style="color:#2e7d32">'
+                f'{html.escape(message)}</div>'
+                '<div hx-get="/frag/settings" hx-trigger="load" '
+                'hx-target="closest .refresh-box" hx-swap="innerHTML"></div>')
+        safe_name = html.escape(entry["name"])
+        return HTMLResponse(
+            f'<div class="small err-text">{html.escape(message)}</div>'
+            '<button class="btn mini" type="button" '
+            'hx-post="/ui/p115/qr/start" '
+            f'hx-vals=\'{{"name": "{safe_name}"}}\' '
+            f'hx-target="#p115-login-box-{safe_name}" '
+            'hx-swap="innerHTML">重新生成</button>')
 
     @router.post("/ui/settings/core", dependencies=[Depends(auth)])
     async def ui_save_core(request: Request):
