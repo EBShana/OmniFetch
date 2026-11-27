@@ -465,26 +465,47 @@ def write_qr_png(matrix, path: str | Path, scale: int = 8) -> None:
 
 
 def _credential_from_response(resp) -> dict[str, str]:
-    """App 渠道登录返回 `data.Credential`（UID/CID/SEID/KID）而不是 Set-Cookie。"""
+    """从扫码确认响应里提取 UID/CID/SEID/KID。
+
+    兼容三种形态：`data.credential` / `data.Credential`（优先）、
+    `data.cookie`（dict 或整串 Cookie；OpenList 文档脚本返回这种）、
+    以及四字段直接平铺在 `data` 下的旧形态。
+    """
     try:
         payload = resp.json()
     except ValueError:
         return {}
     if not isinstance(payload, dict) or payload.get("state") in (0, False):
         return {}
-    node = payload.get("data")
-    if not isinstance(node, dict):
+    data = payload.get("data")
+    if not isinstance(data, dict):
         return {}
+
+    def only_four(mapping) -> dict[str, str]:
+        if not isinstance(mapping, dict):
+            return {}
+        lowered = {str(k).lower(): v for k, v in mapping.items()}
+        return {name: str(lowered[name.lower()])
+                for name in _COOKIE_NAMES
+                if lowered.get(name.lower())}
+
+    # 1) credential / Credential 优先
     for key in ("credential", "Credential"):
-        if isinstance(node.get(key), dict):
-            node = node[key]
-            break
-    jar: dict[str, str] = {}
-    for name in _COOKIE_NAMES:
-        value = node.get(name) or node.get(name.lower())
-        if value:
-            jar[name] = str(value)
-    return jar
+        jar = only_four(data.get(key))
+        if jar:
+            return jar
+    # 2) data.cookie：dict 直接取，字符串按 Cookie 串解析
+    cookie = data.get("cookie")
+    if isinstance(cookie, dict):
+        jar = only_four(cookie)
+        if jar:
+            return jar
+    elif isinstance(cookie, str):
+        jar = only_four(parse_cookie_string(cookie))
+        if jar:
+            return jar
+    # 3) 兼容四字段直接平铺在 data 下
+    return only_four(data)
 
 
 class QrLoginSession:

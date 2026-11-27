@@ -843,6 +843,107 @@ def test_qrcode_login_aborts_on_expired_or_canceled(monkeypatch, tmp_path,
     assert posted == []  # 过期/取消绝不再去确认登录
 
 
+class _JsonResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_credential_from_response_reads_cookie_dict():
+    resp = _JsonResp({"state": 1, "data": {"cookie": {
+        "UID": "u", "CID": "c", "SEID": "s", "KID": "k", "extra": "x"}}})
+    assert p115._credential_from_response(resp) == {
+        "UID": "u", "CID": "c", "SEID": "s", "KID": "k"}
+
+
+def test_credential_from_response_reads_lowercase_cookie_dict():
+    resp = _JsonResp({"state": 1, "data": {"cookie": {
+        "uid": "u", "cid": "c", "seid": "s", "kid": "k"}}})
+    assert p115._credential_from_response(resp) == {
+        "UID": "u", "CID": "c", "SEID": "s", "KID": "k"}
+
+
+def test_credential_from_response_reads_cookie_string():
+    resp = _JsonResp({"state": 1, "data": {
+        "cookie": "UID=u; CID=c; SEID=s; KID=k; acw_tc=ignore"}})
+    assert p115._credential_from_response(resp) == {
+        "UID": "u", "CID": "c", "SEID": "s", "KID": "k"}
+
+
+def test_credential_from_response_prefers_credential_over_cookie():
+    resp = _JsonResp({"state": 1, "data": {
+        "credential": {"UID": "cred", "CID": "c", "SEID": "s", "KID": "k"},
+        "cookie": {"UID": "cookie", "CID": "c", "SEID": "s", "KID": "k"},
+    }})
+    assert p115._credential_from_response(resp)["UID"] == "cred"
+
+
+def test_qrcode_login_cookie_only_does_not_send_web_fallback(monkeypatch, tmp_path):
+    posted: list[str] = []
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class _Cookies:
+        jar: list = []
+
+        def set(self, *args, **kwargs):
+            return None
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            self.headers = {}
+            self.cookies = _Cookies()
+
+        def get(self, url, params=None):
+            if url == p115._QR_TOKEN:
+                return _Resp({"data": {"qrcode": "x", "uid": "u",
+                                       "sign": "s", "time": 1}})
+            return _Resp({"state": True, "data": {"status": 2}})
+
+        def post(self, url, data=None):
+            posted.append(url)
+            return _Resp({"state": True, "data": {"cookie": {
+                "UID": "u", "CID": "c", "SEID": "s", "KID": "k"}}})
+
+        def close(self):
+            return None
+
+    class _Api:
+        def __init__(self, cookie_file, **kwargs):
+            self._client = types.SimpleNamespace(
+                cookies=types.SimpleNamespace(set=lambda *a, **k: None))
+            self.saved = False
+
+        def check_session(self):
+            return True, "Cookie 有效"
+
+        def save_cookies(self):
+            self.saved = True
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(p115.httpx, "Client", _Client)
+    monkeypatch.setattr(p115, "P115Api", _Api)
+    monkeypatch.setattr(p115.time, "sleep", lambda *_: None)
+
+    channel = p115.qrcode_login(str(tmp_path / "cookies.json"),
+                                app="alipaymini")
+    assert channel == "alipaymini"
+    assert len(posted) == 1
+    assert posted[0].endswith("/alipaymini/1.0/login/qrcode/")
+    assert all("/web/" not in url for url in posted)
+
+
 def test_write_qr_png(tmp_path):
     path = tmp_path / "qr" / "p115.png"
     p115.write_qr_png([[True, False], [False, True]], path)
