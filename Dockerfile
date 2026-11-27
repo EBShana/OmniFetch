@@ -1,5 +1,11 @@
 FROM python:3.12-slim
 
+# python:slim 默认不带 tzdata；装上它，compose 里的 TZ=Asia/Shanghai 才会生效，
+# 每日派发额度才会按北京时间午夜重置。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY pyproject.toml README.md ./

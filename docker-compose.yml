@@ -9,11 +9,13 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - omnifetch-data:/data
-      # 若想在 NAS 的 ./data 下直接看到二维码/Cookie，把上一行换成：
-      # - ./data:/data
+      # 宿主机目录映射：在飞牛 NAS 文件管理里能直接看到二维码、Cookie 和数据库。
+      # 若更想用 Docker 命名卷，把下面这行换成：- omnifetch-data:/data
+      - ./data:/data
       - ./config:/app/config
     environment:
+      # 每日派发额度按北京时间午夜重置（镜像内已安装 tzdata）。
+      TZ: "Asia/Shanghai"
       OMNIFETCH_DB: /data/omnifetch.db
       OMNIFETCH_CONFIG: /app/config
       OMNIFETCH_POLL_INTERVAL: "30"
