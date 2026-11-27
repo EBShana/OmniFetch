@@ -38,6 +38,7 @@ class FakeApi:
         self.added_bts: list[str] = []
         self.added_bt_savepaths: list[str | None] = []
         self.deleted: list[str] = []
+        self.session_ok = True
 
     def _added(self) -> dict:
         return {"state": True, "info_hash": self.return_hash} if self.return_hash \
@@ -59,6 +60,11 @@ class FakeApi:
 
     def refresh_cookies(self):
         return False
+
+    def check_session(self):
+        if self.cookie_expired:
+            return False, "Cookie 已失效"
+        return self.session_ok, ("Cookie 有效" if self.session_ok else "Cookie 已失效")
 
     def task_lists(self, page=1, page_size=30, stat=0):
         self.calls += 1
@@ -500,16 +506,15 @@ def test_cancel_without_hash_is_logged_not_silent(caplog):
 
 # ------------------------------------------------------------------ ping
 
-def test_ping_reports_online_and_offline():
+def test_ping_uses_non_kicking_session_check():
     dl = make(FakeApi(tasks=[_task()]))
     ok, detail = dl.ping()
-    assert ok and "1" in detail
+    assert ok and "Cookie" in detail
 
     api = FakeApi()
-    api.task_lists = lambda **kw: (_ for _ in ()).throw(
-        DownloadError("115 Cookie 已失效", ErrorKind.PERMANENT))
+    api.cookie_expired = True
     ok, detail = make(api).ping()
-    assert not ok and "Cookie" in detail
+    assert not ok and "重新扫码" in detail
 
 
 # ------------------------------------------------------------- cookies
@@ -642,3 +647,86 @@ def test_downloader_daily_limit_defaults():
     assert dispatch_daily_limit("qbittorrent", {"dispatch_daily_limit": 5}) == 5
     assert dispatch_daily_limit("p115", {"dispatch_daily_limit": "7"}) == 7
     assert P115Downloader.DEFAULT_CONFIG["dispatch_daily_limit"] == 50
+
+
+# ------------------------------------------------- 115 会话健康检查 / 扫码
+
+def test_check_session_uses_non_kicking_status_url():
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"state": True}
+
+    class _Client:
+        def get(self, url, **kw):
+            captured["url"] = url
+            captured["params"] = kw.get("params")
+            return _Resp()
+
+    api = P115Api("missing.json")
+    api._client.close()
+    api._client = _Client()
+    ok, detail = api.check_session()
+    assert ok and "有效" in detail
+    assert "ct=guide" in captured["url"] and "ac=status" in captured["url"]
+    assert "check/sso" not in captured["url"]  # 不能用会互踢的 LoginCheck
+
+
+def test_check_session_treats_redirect_as_expired():
+    class _Resp:
+        status_code = 302
+
+    class _Client:
+        def get(self, url, **kw):
+            return _Resp()
+
+    api = P115Api("missing.json")
+    api._client.close()
+    api._client = _Client()
+    ok, detail = api.check_session()
+    assert ok is False and api.cookie_expired is True
+    assert "失效" in detail
+
+
+def test_qr_login_url_prefers_app_and_falls_back_to_web():
+    assert p115.qr_login_url("android") == (
+        "https://passportapi.115.com/app/1.0/android/1.0/login/qrcode/")
+    assert p115.qr_login_url("web") == p115._QR_LOGIN
+    assert p115.qr_login_url("bogus") == p115.qr_login_url("android")
+
+
+def test_write_qr_png(tmp_path):
+    path = tmp_path / "qr" / "p115.png"
+    p115.write_qr_png([[True, False], [False, True]], path)
+    assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_session_status_persists_reexport_marker(tmp_path):
+    cookie = tmp_path / "cookies.json"
+    cookie.write_text(json.dumps({"UID": "u"}), encoding="utf-8")
+    api = FakeApi()
+    api.cookie_expired = True
+    dl = make(api, cookie_file=str(cookie))
+    ok, detail = dl.session_status(force=True)
+    assert ok is False and "需要重新扫码" in detail
+    status = p115.read_session_status(cookie)
+    assert status["ok"] is False
+    assert "需要重新扫码" in status["detail"]
+    assert status["checked_at"] > 0
+
+
+def test_submit_blocks_with_reexport_message(tmp_path):
+    cookie = tmp_path / "cookies.json"
+    cookie.write_text(json.dumps({"UID": "u"}), encoding="utf-8")
+    api = FakeApi()
+    api.cookie_expired = True
+    dl = make(api, cookie_file=str(cookie))
+    with pytest.raises(DownloadError) as exc_info:
+        dl.submit(resource("magnet:?xt=urn:btih:" + "AA" * 20,
+                           ResourceType.MAGNET))
+    assert exc_info.value.kind == ErrorKind.PERMANENT
+    assert "需要重新扫码" in str(exc_info.value)
+    assert api.added_urls == []

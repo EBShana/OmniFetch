@@ -19,13 +19,24 @@
     <div class="inst-block">
       <div class="status-line">
         <b class="small">115 Cookie</b>
-        {% if inst.cookie_configured %}
-        <span class="badge b-green">已配置</span>
-        {% else %}
+        {% if not inst.cookie_configured %}
         <span class="badge b-orange">未配置</span>
+        {% elif inst.cookie_state and inst.cookie_state.ok == false %}
+        <span class="badge b-red">需要重新扫码</span>
+        {% elif inst.cookie_state and inst.cookie_state.ok %}
+        <span class="badge b-green">已配置（有效）</span>
+        {% else %}
+        <span class="badge b-green">已配置</span>
+        <span class="badge b-gray">未验证</span>
+        {% endif %}
+        {% if inst.cookie_checked %}
+        <span class="muted small">最后验证 {{ inst.cookie_checked }}</span>
         {% endif %}
         <span class="muted small">只显示状态，不回显内容；保存后写入 {{ inst.cookie_file }}</span>
       </div>
+      {% if inst.cookie_detail %}
+      <div class="muted small err-text">{{ inst.cookie_detail }}</div>
+      {% endif %}
       <div class="inline-form cookie-row">
         <input type="password" name="cookie" autocomplete="off" spellcheck="false"
                placeholder="粘贴 Cookie 字符串：UID=…; CID=…; SEID=…; KID=…">

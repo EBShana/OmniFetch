@@ -37,7 +37,7 @@ from ..crawlers import default_config as crawler_default_config
 from ..downloaders import default_config as downloader_default_config
 from ..downloaders import dispatch_daily_limit, downloader_types
 from ..downloaders.p115 import (P115Downloader, parse_cookie_string,
-                                write_cookie_file)
+                                read_session_status, write_cookie_file)
 from ..webapi.app import check_token, get_candidates
 from .auth import (SESSION_COOKIE, SESSION_TTL, LoginThrottle, create_session,
                    session_secret, verify_session)
@@ -493,6 +493,13 @@ def create_ui_router(settings: Settings, ctx) -> APIRouter:
                     item["cookie_configured"] = _cookie_configured(cfg)
                     item["cookie_file"] = str(cfg.get("cookie_file")
                                               or _P115_DEFAULT_COOKIE)
+                    status = read_session_status(item["cookie_file"])
+                    item["cookie_state"] = status
+                    item["cookie_detail"] = str(status.get("detail") or "")
+                    if status.get("checked_at"):
+                        item["cookie_checked"] = time.strftime(
+                            "%m-%d %H:%M",
+                            time.localtime(float(status["checked_at"])))
                 out.append(item)
             return out
 

@@ -25,6 +25,10 @@ from . import poller, reaper, trigger
 
 log = logging.getLogger(__name__)
 
+# 115 会话失效通知节流：同一实例 6 小时内只提醒一次，避免刷屏。
+_SESSION_NOTIFY_INTERVAL = 6 * 3600
+_session_notified: dict[str, float] = {}
+
 
 @dataclass
 class Context:
@@ -208,6 +212,29 @@ def run_forever(ctx: Context, stop_event: threading.Event | None = None) -> None
         ctx.stop_crawlers()
 
 
+def _notify_expired_sessions(ctx: Context) -> None:
+    """115 会话失效时主动通知（带节流），不要等任务失败才被动暴露。"""
+    for name, downloader in ctx.downloaders.items():
+        if getattr(downloader, "type", "") != "p115":
+            continue
+        checker = getattr(downloader, "session_status", None)
+        if checker is None:
+            continue
+        try:
+            ok, detail = checker()
+        except Exception:
+            log.exception("115 session check failed for %s", name)
+            continue
+        if ok:
+            _session_notified.pop(name, None)
+            continue
+        now = time.monotonic()
+        if now - _session_notified.get(name, 0.0) >= _SESSION_NOTIFY_INTERVAL:
+            _session_notified[name] = now
+            ctx.notify("p115.session_expired",
+                       {"downloader": name, "message": detail})
+
+
 def run_once(ctx: Context) -> None:
     now = utcnow()
     conn = ctx.conn()
@@ -223,5 +250,6 @@ def run_once(ctx: Context) -> None:
                 ctx.notify("want.given_up", {"want_id": want_id, "reason": "no_downloader"})
         poller.dispatch(conn, ctx, now)
         poller.poll_active(conn, ctx, now)
+        _notify_expired_sessions(ctx)
     finally:
         conn.close()

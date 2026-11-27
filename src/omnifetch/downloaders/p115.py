@@ -38,7 +38,9 @@ import json
 import logging
 import os
 import re
+import struct
 import time
+import zlib
 from pathlib import Path
 
 import httpx
@@ -58,7 +60,12 @@ _MAX_SCAN_PAGES = 100
 _QR_TOKEN = "https://qrcodeapi.115.com/api/1.0/web/1.0/token/"
 _QR_PROMPT = "https://qrcodeapi.115.com/api/2.0/prompt.php"
 _QR_LOGIN = "https://qrcodeapi.115.com/app/1.0/web/1.0/login/qrcode/"
+# App 渠道（android/ios/tv/…）走 passportapi 的扫码确认，返回 Credential JSON。
+_QR_LOGIN_APP = "https://passportapi.115.com/app/1.0/{app}/1.0/login/qrcode/"
+_QR_APPS = ("web", "android", "ios", "tv", "alipaymini", "wechatmini", "qandroid")
 _SIGN_URL = "https://115.com/?ct=clouddownload&ac=space"
+# 非踢人健康检查：与 115driver CookieCheck 同款，只校验登录态。
+_STATUS_URL = "https://my.115.com/?ct=guide&ac=status"
 _CLOUD = "https://clouddownload.115.com/"
 # 添加任务只接受 /web/ 路径且 ac 放在表单；根路径会返回“请升级新版本”。
 _CLOUD_WEB = "https://clouddownload.115.com/web/"
@@ -128,6 +135,33 @@ def write_cookie_file(cookie_file: str | Path, jar: dict[str, str]) -> None:
     except OSError:  # Windows does not always honor POSIX mode bits
         pass
 
+
+def session_status_path(cookie_file: str | Path) -> Path:
+    """健康检查状态旁路文件（与 Cookie 同目录，避免污染 Cookie JSON）。"""
+    return Path(str(cookie_file) + ".status.json")
+
+
+def read_session_status(cookie_file: str | Path) -> dict:
+    try:
+        data = json.loads(session_status_path(cookie_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_session_status(cookie_file: str | Path, ok: bool, detail: str) -> None:
+    """记录最后验证时间与结果；Cookie 文件不存在时不写（测试/未登录场景）。"""
+    if not Path(cookie_file).exists():
+        return
+    path = session_status_path(cookie_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"ok": bool(ok), "checked_at": time.time(), "detail": detail}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------- bencode
@@ -228,6 +262,29 @@ class P115Api:
             raise DownloadError("登录后未获得有效 Cookie", ErrorKind.PERMANENT)
         write_cookie_file(self._cookie_file, jar)
 
+    def check_session(self) -> tuple[bool, str]:
+        """非踢人健康检查（`ct=guide&ac=status`，不会踢掉其它设备）。
+
+        与 LoginCheck（passportapi check/sso）不同，这里只读登录态。
+        """
+        try:
+            resp = self._client.get(
+                _STATUS_URL, params={"_": int(time.time() * 1000)})
+        except httpx.HTTPError as exc:
+            raise DownloadError(f"115 健康检查失败：{exc}",
+                                ErrorKind.TRANSIENT) from exc
+        if resp.status_code in (301, 302, 303, 307, 308) or resp.status_code >= 400:
+            self.cookie_expired = True
+            return False, "Cookie 已失效（跳转登录页）"
+        try:
+            data = resp.json()
+        except ValueError:
+            self.cookie_expired = True
+            return False, "Cookie 已失效（返回登录页）"
+        ok = bool(data.get("state"))
+        self.cookie_expired = not ok
+        return ok, ("Cookie 有效" if ok else "Cookie 已失效")
+
     # -- request core
     def _request(self, method: str, url: str, **kw) -> dict:
         response = self._client.request(method, url, **kw)
@@ -294,18 +351,86 @@ class P115Api:
             log.info("115 delete task best-effort failed: %s", exc)
 
 
+def qr_login_url(app: str) -> str:
+    """App 渠道走 passportapi，web 渠道走 qrcodeapi。"""
+    app = (app or "web").strip().lower()
+    if app == "web":
+        return _QR_LOGIN
+    if app not in _QR_APPS:
+        app = "android"
+    return _QR_LOGIN_APP.format(app=app)
+
+
+def write_qr_png(matrix, path: str | Path, scale: int = 8) -> None:
+    """纯标准库写 PNG（不依赖 Pillow）。matrix 为 qrcode.get_matrix()。"""
+    height, width = len(matrix), len(matrix[0])
+    raw = bytearray()
+    for row in matrix:
+        line = bytearray()
+        for value in row:
+            line.extend((0 if value else 255,) * scale)
+        for _ in range(scale):
+            raw.append(0)
+            raw.extend(line)
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", width * scale, height * scale, 8, 0, 0, 0, 0)
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+           + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b""))
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(png)
+
+
+def _credential_from_response(resp) -> dict[str, str]:
+    """App 渠道登录返回 `data.Credential`（UID/CID/SEID/KID）而不是 Set-Cookie。"""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return {}
+    if not isinstance(payload, dict) or payload.get("state") in (0, False):
+        return {}
+    node = payload.get("data")
+    if not isinstance(node, dict):
+        return {}
+    for key in ("credential", "Credential"):
+        if isinstance(node.get(key), dict):
+            node = node[key]
+            break
+    jar: dict[str, str] = {}
+    for name in _COOKIE_NAMES:
+        value = node.get(name) or node.get(name.lower())
+        if value:
+            jar[name] = str(value)
+    return jar
+
+
 def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
-                 timeout: int = 180) -> None:
-    """扫码登录：终端显示二维码，115 App 扫描确认后 Cookie 写入文件。"""
+                 timeout: int = 180, app: str = "android",
+                 qr_png: str | None = None,
+                 fallback_web: bool = True) -> str:
+    """扫码登录，返回实际成功的渠道名。
+
+    app 渠道优先（默认 android），确认失败时按需回退 web。qr_png 指定时
+    会把二维码矩阵导出为 PNG。
+    """
     import qrcode
 
+    app = (app or "android").strip().lower()
     client = httpx.Client(timeout=30)
     client.headers["User-Agent"] = user_agent
     try:
         token = client.get(_QR_TOKEN).json()["data"]
-        qr = qrcode.QRCode(border=1)
+        qr = qrcode.QRCode(border=4 if qr_png else 1)
         qr.add_data(token["qrcode"])
+        qr.make(fit=True)
         qr.print_ascii(invert=True)
+        if qr_png:
+            write_qr_png(qr.get_matrix(), qr_png)
+            print(f"二维码已导出：{qr_png}")
         print("请用 115 手机 App 扫描上方二维码（%d 秒内）…" % timeout)
 
         deadline = time.time() + timeout
@@ -324,23 +449,40 @@ def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
         else:
             raise DownloadError("扫码超时，请重试", ErrorKind.TRANSIENT)
 
-        login = client.post(_QR_LOGIN, data={"account": token["uid"]})
-        if login.status_code >= 400:
-            raise DownloadError(f"登录确认失败 HTTP {login.status_code}",
-                                ErrorKind.TRANSIENT)
-
-        # 汇总登录 Cookie 到专用客户端，验证登录态后落盘
-        api = P115Api(cookie_file=cookie_file)
-        try:
-            for morsel in client.cookies.jar:
-                api._client.cookies.set(morsel.name, morsel.value, domain=morsel.domain)
-            api._check(api._request("GET", _SIGN_URL), "验证登录")
-            api.save_cookies()
-        finally:
-            api.close()
+        candidates = [app] + (["web"] if fallback_web and app != "web" else [])
+        last_error = ""
+        for candidate in candidates:
+            login = client.post(qr_login_url(candidate),
+                                data={"account": token["uid"]})
+            if login.status_code >= 400:
+                last_error = f"{candidate} 渠道登录确认失败 HTTP {login.status_code}"
+                continue
+            jar = _credential_from_response(login)
+            if not jar:
+                # web 渠道可能只通过 Set-Cookie 下发
+                jar = {m.name: m.value for m in client.cookies.jar
+                       if m.name in _COOKIE_NAMES}
+            if not jar:
+                last_error = f"{candidate} 渠道登录响应未包含 UID/CID/SEID/KID"
+                continue
+            api = P115Api(cookie_file=cookie_file)
+            try:
+                for name, value in jar.items():
+                    api._client.cookies.set(name, value, domain=".115.com")
+                ok, detail = api.check_session()
+                if not ok:
+                    last_error = f"{candidate} 渠道登录后校验失败：{detail}"
+                    continue
+                api.save_cookies()
+            finally:
+                api.close()
+            write_session_status(cookie_file, True, "Cookie 有效")
+            print(f"登录成功（{candidate} 渠道），Cookie 已保存到 {cookie_file}")
+            return candidate
+        raise DownloadError("扫码确认后登录失败：" + (last_error or "未知原因"),
+                            ErrorKind.PERMANENT)
     finally:
         client.close()
-    print(f"登录成功，Cookie 已保存到 {cookie_file}")
 
 
 # -------------------------------------------------------------------- plugin
@@ -354,6 +496,7 @@ class P115Downloader(DownloaderPlugin):
                       "target_dir_id": "3571296246695987055",
                       "savepath": "", "proxy": "",
                       "submit_grace_seconds": 90, "snapshot_ttl": 10,
+                      "health_check_ttl": 60,
                       "dispatch_daily_limit": 50}
 
     def __init__(self, name: str, config: dict):
@@ -370,6 +513,10 @@ class P115Downloader(DownloaderPlugin):
         self._snapshot_complete = True
         self._snapshot_at = 0.0
         self._now = time.monotonic
+        self._health_ttl = float(config.get("health_check_ttl", 60) or 0)
+        self._health_at = 0.0
+        self._health_ok: bool | None = None
+        self._health_detail = ""
 
     def _get_api(self) -> P115Api:
         if self._api is None:
@@ -382,14 +529,55 @@ class P115Downloader(DownloaderPlugin):
         return self._api
 
     def _cookie_hint(self) -> str:
-        return (f"115 Cookie 已失效，请重新运行 omnifetch 115-login {self.name} "
-                "扫码后再试")
+        return (f"115 需要重新扫码：Cookie 已失效，请运行 omnifetch 115-login "
+                f"{self.name} 扫码后再试")
 
     def _cookie_expired_result(self) -> TaskResult:
         # 云端任务可能还在跑，判永久失败会让核心换源重下；标成可重试，
         # 重新扫码后 submit 走“已存在”分支即可恢复跟踪。
+        self._health_ok = False
+        self._health_at = self._now()
+        self._health_detail = self._cookie_hint()
+        if self._cookie_file:
+            try:
+                write_session_status(self._cookie_file, False, self._health_detail)
+            except OSError as exc:
+                log.warning("115 会话状态写入失败：%s", exc)
         return TaskResult(PollStatus.FAILED, error_kind=ErrorKind.TRANSIENT,
                           error_message=self._cookie_hint())
+
+    def session_status(self, force: bool = False) -> tuple[bool, str]:
+        """非踢人健康检查（带 TTL 缓存），并把结果写入旁路状态文件。"""
+        api = self._get_api()
+        if api.refresh_cookies():
+            self._health_at = 0.0
+            self._health_ok = None
+        now = self._now()
+        if (not force and self._health_ok is not None
+                and now - self._health_at < self._health_ttl):
+            return self._health_ok, self._health_detail
+        if api.cookie_expired:
+            # 已知失效就别再打 115 接口
+            ok, detail = False, self._cookie_hint()
+        else:
+            try:
+                ok, detail = api.check_session()
+            except DownloadError as exc:
+                ok, detail = False, str(exc)
+        self._health_ok = ok
+        self._health_at = now
+        if ok:
+            self._health_detail = "115 Cookie 有效"
+        elif detail.startswith("115 需要重新扫码"):
+            self._health_detail = detail
+        else:
+            self._health_detail = f"115 需要重新扫码：{detail}"
+        if self._cookie_file:
+            try:
+                write_session_status(self._cookie_file, ok, self._health_detail)
+            except OSError as exc:
+                log.warning("115 会话状态写入失败：%s", exc)
+        return ok, self._health_detail
 
     # -------------------------------------------------------------- submit
 
@@ -398,10 +586,10 @@ class P115Downloader(DownloaderPlugin):
         if not uri:
             raise DownloadError("资源没有下载地址", ErrorKind.PERMANENT)
         api = self._get_api()
-        api.refresh_cookies()
-        if api.cookie_expired:
+        ok, detail = self.session_status(force=True)
+        if not ok:
             # 别再拿失效 Cookie 去撞 115 接口
-            raise DownloadError(self._cookie_hint(), ErrorKind.PERMANENT)
+            raise DownloadError(detail, ErrorKind.PERMANENT)
         magnet = _BTITH_RE.search(uri)
         try:
             if magnet:
@@ -596,12 +784,6 @@ class P115Downloader(DownloaderPlugin):
 
     def ping(self) -> tuple[bool, str]:
         try:
-            api = self._get_api()
-            api.refresh_cookies()
-            if api.cookie_expired:
-                return False, self._cookie_hint()
-            tasks, complete = self._tasks_snapshot()
+            return self.session_status(force=True)
         except DownloadError as exc:
             return False, str(exc)
-        suffix = "" if complete else "（列表未扫完）"
-        return True, f"115 在线，离线任务共 {len(tasks)} 个{suffix}"

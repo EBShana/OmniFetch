@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p115 = sub.add_parser("115-login", help="扫码登录 115 网盘（下载器实例需 type=p115）")
     p115.add_argument("name", help="downloaders.d 中的实例名")
+    p115.add_argument("--app", default="android",
+                      choices=["android", "ios", "tv", "web", "alipaymini",
+                               "wechatmini", "qandroid"],
+                      help="扫码渠道（默认 android，确认失败自动回退 web）")
+    p115.add_argument("--qr-png", default="",
+                      help="把二维码导出为 PNG 文件（例如 tmp/p115-qr.png）")
 
     sub.add_parser(
         "hash-password",
@@ -128,7 +134,9 @@ def main(argv: list[str] | None = None) -> int:
             print("错误：该实例未配置 cookie_file")
             return 1
         try:
-            qrcode_login(cookie_file)
+            channel = qrcode_login(cookie_file, app=args.app,
+                                   qr_png=args.qr_png or None)
+            print(f"登录渠道：{channel}")
         except Exception as exc:
             print(f"登录失败：{exc}")
             return 1
