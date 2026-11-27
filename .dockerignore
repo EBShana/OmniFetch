@@ -10,5 +10,7 @@ __pycache__
 config/omnifetch.toml
 config/sources.d/vcb.toml
 config/downloaders.d/p115.toml
+config/downloaders.d/aria2.toml
+config/downloaders.d/qbittorrent.toml
 config/**/*.cookie
 config/**/*cookies*.json
