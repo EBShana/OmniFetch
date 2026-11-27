@@ -34,21 +34,23 @@ class FakeApi:
         self.calls = 0
         self.cookie_expired = False
         self.added_urls: list[str] = []
+        self.added_url_savepaths: list[str | None] = []
         self.added_bts: list[str] = []
-        self.added_bt_savepaths: list[str] = []
+        self.added_bt_savepaths: list[str | None] = []
         self.deleted: list[str] = []
 
     def _added(self) -> dict:
         return {"state": True, "info_hash": self.return_hash} if self.return_hash \
             else {"state": True}
 
-    def add_task_url(self, url, wp_path_id="0", savepath=""):
+    def add_task_url(self, url, wp_path_id="0", savepath=None):
         if self.add_error:
             raise self.add_error
         self.added_urls.append(url)
+        self.added_url_savepaths.append(savepath)
         return self._added()
 
-    def add_task_bt(self, info_hash, wp_path_id="0", savepath=""):
+    def add_task_bt(self, info_hash, wp_path_id="0", savepath=None):
         if self.add_error:
             raise self.add_error
         self.added_bts.append(info_hash)
@@ -97,12 +99,14 @@ def test_torrent_infohash_rejects_non_torrent():
 
 def test_submit_magnet_uses_url_api():
     api = FakeApi()
-    dl = make(api)
+    dl = make(api, target_dir_id="123", savepath="anime/2025")
     key = dl.submit(resource(
         "magnet:?xt=urn:btih:ABCDEF0123456789ABCDEF0123456789ABCDEF01",
         ResourceType.MAGNET))
     assert key == "hash:abcdef0123456789abcdef0123456789abcdef01"
     assert len(api.added_urls) == 1 and not api.added_bts
+    # 磁链不传 savepath，让 115 按种子名自动建目录
+    assert api.added_url_savepaths == [None]
 
 
 def test_btih_hex_normalizes_base32_and_hex():
@@ -155,12 +159,21 @@ def test_submit_magnet_prefers_returned_hash():
     assert key == "hash:" + "cd" * 20
 
 
-def test_submit_torrent_passes_savepath():
+def test_submit_torrent_omits_savepath():
     api = FakeApi()
     dl = make(api, target_dir_id="123", savepath="anime/2025")
     dl._fetch_torrent = lambda url: TORRENT  # stub network
     dl.submit(resource("https://nyaa.si/download/1.torrent", ResourceType.TORRENT))
-    assert api.added_bt_savepaths == ["anime/2025"]
+    # 种子任务只传 wp_path_id，不传 savepath
+    assert api.added_bt_savepaths == [None]
+
+
+def test_submit_http_passes_savepath():
+    api = FakeApi()
+    dl = make(api, target_dir_id="123", savepath="anime/2025")
+    dl.submit(resource("https://example.com/file.zip", ResourceType.HTTP))
+    # 普通链接任务仍按配置传 savepath
+    assert api.added_url_savepaths == ["anime/2025"]
 
 
 def test_submit_duplicate_is_idempotent():
@@ -429,13 +442,14 @@ def test_add_tasks_post_to_web_endpoint():
     api._client = _Client()
 
     api.add_task_url("https://x/f.zip", "123", "anime")
-    api.add_task_bt("ab" * 20, "123", "anime")
+    api.add_task_bt("ab" * 20, "123")
 
     assert calls[0]["url"] == "https://clouddownload.115.com/web/"
     assert calls[0]["data"] == {"url": "https://x/f.zip", "wp_path_id": "123",
                                 "savepath": "anime", "ac": "add_task_url"}
+    # BT 接口不传 savepath，只带 wp_path_id
     assert calls[1]["data"] == {"info_hash": "ab" * 20, "wp_path_id": "123",
-                                "savepath": "anime", "ac": "add_task_bt"}
+                                "ac": "add_task_bt"}
     assert "params" not in calls[0] and "params" not in calls[1]
 
 

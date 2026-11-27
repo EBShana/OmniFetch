@@ -12,8 +12,10 @@
 
 Config keys (downloaders.d/*.toml):
   cookie_file    扫码登录产物（JSON），由 `omnifetch 115-login <实例名>` 生成
-  target_dir_id  离线保存目录 id，默认 "0"（网盘根目录）
-  savepath       目录下的相对子路径，默认 ""
+  target_dir_id  离线保存目录 id，默认 "0"（网盘根目录）；BT/磁链会在此目录下
+                 由 115 自动按种子名建子目录
+  savepath       仅对普通链接（http/ed2k）任务生效的保存子路径，默认 ""
+                 （BT/磁链不传 savepath，避免覆盖 115 的自动建目录行为）
   proxy          可选；仅用于抓取 .torrent 文件解析 infohash，115 本身直连
   submit_grace_seconds  新任务在列表里出现前的宽限期，默认 90 秒
   snapshot_ttl   任务列表快照的复用时长（秒），默认 10
@@ -261,19 +263,21 @@ class P115Api:
 
     # -- offline operations
     def add_task_url(self, url: str, wp_path_id: str = "0",
-                     savepath: str = "") -> dict:
-        data = self._request("POST", _CLOUD_WEB,
-                             data={"url": url, "wp_path_id": wp_path_id,
-                                   "savepath": savepath, "ac": "add_task_url"})
-        return self._check(data, "添加离线任务")
+                     savepath: str | None = None) -> dict:
+        data = {"url": url, "wp_path_id": wp_path_id, "ac": "add_task_url"}
+        if savepath is not None:
+            data["savepath"] = savepath
+        return self._check(
+            self._request("POST", _CLOUD_WEB, data=data), "添加离线任务")
 
     def add_task_bt(self, info_hash: str, wp_path_id: str = "0",
-                    savepath: str = "") -> dict:
-        data = self._request("POST", _CLOUD_WEB,
-                             data={"info_hash": info_hash,
-                                   "wp_path_id": wp_path_id,
-                                   "savepath": savepath, "ac": "add_task_bt"})
-        return self._check(data, "添加离线任务")
+                    savepath: str | None = None) -> dict:
+        data = {"info_hash": info_hash, "wp_path_id": wp_path_id,
+                "ac": "add_task_bt"}
+        if savepath is not None:
+            data["savepath"] = savepath
+        return self._check(
+            self._request("POST", _CLOUD_WEB, data=data), "添加离线任务")
 
     def task_lists(self, page: int = 1, page_size: int = 30, stat: int = 0) -> dict:
         return self._request("GET", _CLOUD, params={
@@ -347,7 +351,8 @@ class P115Downloader(DownloaderPlugin):
     accepts = (ResourceType.MAGNET, ResourceType.TORRENT, ResourceType.HTTP,
                ResourceType.NETDISK)
     DEFAULT_CONFIG = {"cookie_file": "data/p115_cookies.json",
-                      "target_dir_id": "0", "savepath": "", "proxy": "",
+                      "target_dir_id": "3571296246695987055",
+                      "savepath": "", "proxy": "",
                       "submit_grace_seconds": 90, "snapshot_ttl": 10,
                       "dispatch_daily_limit": 50}
 
@@ -401,14 +406,14 @@ class P115Downloader(DownloaderPlugin):
         try:
             if magnet:
                 returned = self._returned_hash(
-                    api.add_task_url(uri, self._target_dir, self._savepath))
+                    api.add_task_url(uri, self._target_dir))
                 key = f"hash:{returned or btih_hex(magnet.group(1))}"
             elif resource.resource_type == ResourceType.TORRENT or \
                     uri.lower().endswith(".torrent"):
                 # .torrent 文件：解析 infohash 后走 bt 接口（无需上传种子）
                 digest = torrent_infohash(self._fetch_torrent(uri))
                 returned = self._returned_hash(
-                    api.add_task_bt(digest, self._target_dir, self._savepath))
+                    api.add_task_bt(digest, self._target_dir))
                 key = f"hash:{returned or digest}"
             else:
                 returned = self._returned_hash(

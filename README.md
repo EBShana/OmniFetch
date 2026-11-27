@@ -58,7 +58,9 @@ TOML 格式，三个位置：
 
 - `config/omnifetch.toml` — 核心设置（调度、并发、令牌、UI 登录等），可复制 `config/omnifetch.example.toml`
 - `config/sources.d/*.toml` — 每个爬取源一个文件（`type`/`enabled`/`interval`/`url`…，其余参数原样传给插件）
-- `config/downloaders.d/*.toml` — 每个下载器实例一个文件
+- `config/downloaders.d/*.toml` — 每个下载器实例一个文件（如 115：BT/磁链保存到
+  `target_dir_id` 下并由 115 按种子名自动建子目录；普通链接可用 `savepath` 再指定子路径，
+  见 `p115.example.toml`）
 
 环境变量 `OMNIFETCH_*` 优先于 TOML（旧前缀 `OMNFETCH_*` 仍兼容）。
 
