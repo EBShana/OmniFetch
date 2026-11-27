@@ -3,7 +3,12 @@ name = "p115"
 type = "p115"
 enabled = false
 
-cookie_file = "./data/p115_cookies.json"
+# Docker 部署必须用容器内绝对路径 /data/...（持久化卷，重建不丢）；
+# 本地直接运行可改为 "./data/p115_cookies.json"。
+cookie_file = "/data/p115_cookies.json"
+# 扫码渠道；omnifetch 115-login 未显式传 --app 时读取它（默认 android）。
+# 冷门终端可用 alipaymini/wechatmini/tv 等，减少与手机端互踢。
+login_app = "alipaymini"
 target_dir_id = "0"        # 网盘保存目录 id（0 = 根目录）；BT/磁链在此目录下按种子名自动建子目录
 savepath = ""              # 仅普通链接（http/ed2k）生效的子路径；BT/磁链不传，避免覆盖自动建目录
 # proxy 仅在抓取 .torrent 文件解析 infohash 时走代理（如 nyaa 需要），115 本身国内直连

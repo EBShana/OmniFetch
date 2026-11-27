@@ -20,6 +20,8 @@ Config keys (downloaders.d/*.toml):
   submit_grace_seconds  新任务在列表里出现前的宽限期，默认 90 秒
   risk_cooldown_seconds 遇到 403/405/429 或风控文本后的冷却时长，默认 1800 秒；
                  冷却期内 submit/poll/健康检查全部本地返回，不发 115 请求
+  login_app      扫码登录渠道（android/alipaymini/…），供 `115-login` 未显式
+                 指定 --app 时读取；默认 android
   snapshot_ttl   任务列表快照的复用时长（秒），默认 10
   user_agent     可选（当前未生效，见开发清单）
 
@@ -483,17 +485,19 @@ def _credential_from_response(resp) -> dict[str, str]:
 
 
 def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
-                 timeout: int = 180, app: str = "android",
+                 timeout: int = 180, app: str | None = None,
                  qr_png: str | None = None,
-                 fallback_web: bool = True) -> str:
+                 fallback_web: bool = False) -> str:
     """扫码登录，返回实际成功的渠道名。
 
-    app 渠道优先（默认 android），确认失败时按需回退 web。qr_png 指定时
-    会把二维码矩阵导出为 PNG。
+    app 渠道优先（默认 android），只有显式 fallback_web=True 时才回退 web。
+    qr_png 指定时会把二维码矩阵导出为 PNG。
     """
     import qrcode
 
     app = (app or "android").strip().lower()
+    if app not in _QR_APPS:
+        raise DownloadError(f"不支持的扫码渠道：{app}", ErrorKind.PERMANENT)
     client = httpx.Client(timeout=30)
     client.headers["User-Agent"] = user_agent
     try:
@@ -517,6 +521,10 @@ def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
             status = (resp.get("data") or {}).get("status")
             if status == 2:
                 break
+            if status == -1:
+                raise DownloadError("二维码已过期，请重新生成", ErrorKind.TRANSIENT)
+            if status == -2:
+                raise DownloadError("已在手机端取消登录", ErrorKind.PERMANENT)
             if status is False or (not resp.get("state") and status is None):
                 raise DownloadError(f"扫码状态异常：{resp.get('message')}",
                                     ErrorKind.PERMANENT)
@@ -527,7 +535,7 @@ def qrcode_login(cookie_file: str, user_agent: str = DEFAULT_UA,
         last_error = ""
         for candidate in candidates:
             login = client.post(qr_login_url(candidate),
-                                data={"account": token["uid"]})
+                                data={"account": token["uid"], "app": candidate})
             if login.status_code >= 400:
                 last_error = f"{candidate} 渠道登录确认失败 HTTP {login.status_code}"
                 continue
@@ -571,6 +579,7 @@ class P115Downloader(DownloaderPlugin):
                       "savepath": "", "proxy": "",
                       "submit_grace_seconds": 90, "snapshot_ttl": 10,
                       "health_check_ttl": 60, "risk_cooldown_seconds": 1800,
+                      "login_app": "android",
                       "dispatch_daily_limit": 50}
 
     def __init__(self, name: str, config: dict):

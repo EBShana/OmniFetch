@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+import types
 
 import pytest
 
@@ -709,6 +710,137 @@ def test_qr_login_url_prefers_app_and_falls_back_to_web():
         "https://passportapi.115.com/app/1.0/android/1.0/login/qrcode/")
     assert p115.qr_login_url("web") == p115._QR_LOGIN
     assert p115.qr_login_url("bogus") == p115.qr_login_url("android")
+    assert p115.qr_login_url("alipaymini") == (
+        "https://passportapi.115.com/app/1.0/alipaymini/1.0/login/qrcode/")
+
+
+def test_qrcode_login_defaults_do_not_fallback_web():
+    import inspect
+
+    params = inspect.signature(p115.qrcode_login).parameters
+    assert params["app"].default is None
+    assert params["fallback_web"].default is False
+    assert P115Downloader.DEFAULT_CONFIG["login_app"] == "android"
+
+
+def test_qrcode_login_rejects_unknown_app_before_network():
+    with pytest.raises(DownloadError) as exc_info:
+        p115.qrcode_login("missing.json", app="bogus")
+    assert exc_info.value.kind == ErrorKind.PERMANENT
+    assert "不支持" in str(exc_info.value)
+
+
+def test_qrcode_login_alipaymini_sends_app_and_does_not_fallback(monkeypatch, tmp_path):
+    posted: list[tuple[str, dict]] = []
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class _Cookies:
+        jar: list = []
+
+        def set(self, *args, **kwargs):
+            return None
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            self.headers = {}
+            self.cookies = _Cookies()
+
+        def get(self, url, params=None):
+            if url == p115._QR_TOKEN:
+                return _Resp({"data": {"qrcode": "x", "uid": "u",
+                                       "sign": "s", "time": 1}})
+            return _Resp({"state": True, "data": {"status": 2}})
+
+        def post(self, url, data=None):
+            posted.append((url, dict(data or {})))
+            return _Resp({"state": True, "data": {"Credential": {
+                "UID": "u", "CID": "c", "SEID": "s", "KID": "k"}}})
+
+        def close(self):
+            return None
+
+    class _Api:
+        def __init__(self, cookie_file, **kwargs):
+            self._client = types.SimpleNamespace(
+                cookies=types.SimpleNamespace(set=lambda *a, **k: None))
+            self.saved = False
+
+        def check_session(self):
+            return True, "Cookie 有效"
+
+        def save_cookies(self):
+            self.saved = True
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(p115.httpx, "Client", _Client)
+    monkeypatch.setattr(p115, "P115Api", _Api)
+    monkeypatch.setattr(p115.time, "sleep", lambda *_: None)
+
+    channel = p115.qrcode_login(str(tmp_path / "cookies.json"),
+                                app="alipaymini")
+    assert channel == "alipaymini"
+    assert len(posted) == 1
+    url, data = posted[0]
+    assert url.endswith("/alipaymini/1.0/login/qrcode/")
+    assert data == {"account": "u", "app": "alipaymini"}
+
+
+@pytest.mark.parametrize("status,kind,text", [
+    (-1, ErrorKind.TRANSIENT, "过期"),
+    (-2, ErrorKind.PERMANENT, "取消"),
+])
+def test_qrcode_login_aborts_on_expired_or_canceled(monkeypatch, tmp_path,
+                                                    status, kind, text):
+    posted: list[str] = []
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class _Cookies:
+        jar: list = []
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            self.headers = {}
+            self.cookies = _Cookies()
+
+        def get(self, url, params=None):
+            if url == p115._QR_TOKEN:
+                return _Resp({"data": {"qrcode": "x", "uid": "u",
+                                       "sign": "s", "time": 1}})
+            return _Resp({"state": True, "data": {"status": status}})
+
+        def post(self, url, data=None):
+            posted.append(url)
+            return _Resp({"state": True})
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(p115.httpx, "Client", _Client)
+    monkeypatch.setattr(p115.time, "sleep", lambda *_: None)
+
+    with pytest.raises(DownloadError) as exc_info:
+        p115.qrcode_login(str(tmp_path / "cookies.json"), app="alipaymini")
+    assert exc_info.value.kind == kind
+    assert text in str(exc_info.value)
+    assert posted == []  # 过期/取消绝不再去确认登录
 
 
 def test_write_qr_png(tmp_path):

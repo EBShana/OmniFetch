@@ -10,6 +10,8 @@ services:
       - "8080:8080"
     volumes:
       - omnifetch-data:/data
+      # 若想在 NAS 的 ./data 下直接看到二维码/Cookie，把上一行换成：
+      # - ./data:/data
       - ./config:/app/config
     environment:
       OMNIFETCH_DB: /data/omnifetch.db

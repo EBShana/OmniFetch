@@ -31,12 +31,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p115 = sub.add_parser("115-login", help="扫码登录 115 网盘（下载器实例需 type=p115）")
     p115.add_argument("name", help="downloaders.d 中的实例名")
-    p115.add_argument("--app", default="android",
+    p115.add_argument("--app", default=None,
                       choices=["android", "ios", "tv", "web", "alipaymini",
                                "wechatmini", "qandroid"],
-                      help="扫码渠道（默认 android，确认失败自动回退 web）")
+                      help="扫码渠道（未指定时读取配置 login_app，再回退 android）")
+    p115.add_argument("--fallback-web", action="store_true",
+                      help="App 渠道确认失败时才回退 web（默认关闭，避免二次登录/互踢）")
     p115.add_argument("--qr-png", default="",
-                      help="把二维码导出为 PNG 文件（例如 tmp/p115-qr.png）")
+                      help="把二维码导出为 PNG 文件（例如 /data/p115-qr.png）")
 
     sub.add_parser(
         "hash-password",
@@ -133,9 +135,11 @@ def main(argv: list[str] | None = None) -> int:
         if not cookie_file:
             print("错误：该实例未配置 cookie_file")
             return 1
+        app = args.app or str(cfg.get("login_app") or "android")
         try:
-            channel = qrcode_login(cookie_file, app=args.app,
-                                   qr_png=args.qr_png or None)
+            channel = qrcode_login(cookie_file, app=app,
+                                   qr_png=args.qr_png or None,
+                                   fallback_web=args.fallback_web)
             print(f"登录渠道：{channel}")
         except Exception as exc:
             print(f"登录失败：{exc}")
